@@ -9,6 +9,20 @@ def read_json(path: Path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
+def new_run_dir(base: Path, now=None) -> Path:
+    """실행 폴더를 만든다: 날짜_시각_번호 (한글 없음, 예: 20261021_1530_r004).
+    번호는 base 안의 기존 r번호 최댓값 + 1 이라 날짜가 바뀌어도 이어진다."""
+    from datetime import datetime
+    base = Path(base)
+    base.mkdir(parents=True, exist_ok=True)
+    nums = [int(m.group(1)) for p in base.iterdir() if p.is_dir()
+            if (m := re.search(r"_r(\d+)$", p.name))]
+    stamp = (now or datetime.now()).strftime("%Y%m%d_%H%M")
+    run = base / f"{stamp}_r{max(nums, default=0) + 1:03d}"
+    run.mkdir()
+    return run
+
+
 def script_versions(run_dir: Path) -> list[Path]:
     """script_v1.json, script_v2.json … 를 버전 순서로 (덮어쓰지 않고 쌓는 파일들)."""
     return sorted(Path(run_dir).glob("script_v*.json"),
