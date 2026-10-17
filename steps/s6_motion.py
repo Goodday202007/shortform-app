@@ -1,9 +1,9 @@
 """⑥ 이미지 영상화 단계.
-입력: script_v*.json, timings.json, scenes/s01.png …
+입력: timings.json, scenes/s01.png …
 출력: scenes/s01.mp4 … (1080x1920, 30fps, 장면 길이만큼)
 실행: python -m steps.s6_motion --run outputs/<실행폴더>
 
-- type이 stock인 장면은 ⑤에서 이미 mp4를 받았으므로 건너뛴다.
+- png가 없고 mp4만 있는 장면(⑤가 받은 스톡 영상)은 건너뛴다.
 - 그림·장면 길이·움직임이 그대로인 클립은 다시 만들지 않는다 → 문제 장면만 재생성.
 - 장면 길이는 timings.json(④가 ffprobe로 잰 값)을 쓴다. 프레임 단위로 올림하므로
   클립이 최대 1프레임(1/30초) 길 수 있고, 맞추는 일은 ⑦ 합성이 한다.
@@ -15,7 +15,6 @@ import subprocess
 from pathlib import Path
 
 from common.fileio import read_json, write_json
-from steps.s4_voice import latest_script
 
 W, H, FPS = 1080, 1920, 30
 ZOOM = 0.15   # 장면 동안 15% 확대
@@ -50,7 +49,6 @@ def make_clip(run_dir: Path, no: int, duration: float) -> None:
 
 def run(run_dir: Path) -> None:
     run_dir = Path(run_dir)
-    scenes = {s["no"]: s for s in read_json(latest_script(run_dir))["scenes"]}
     timings = read_json(run_dir / "timings.json")
     sdir = run_dir / "scenes"
     meta_path = sdir / "_motion_meta.json"
@@ -59,11 +57,12 @@ def run(run_dir: Path) -> None:
     made = 0
     for tm in timings:
         no, name = tm["no"], f"s{tm['no']:02d}"
-        if scenes[no]["type"] == "stock":
-            print(f"{name}: 스톡 영상 → 건너뜀")
-            continue
         png, mp4 = sdir / f"{name}.png", sdir / f"{name}.mp4"
+        # 대본의 type이 아니라 ⑤가 실제로 만든 파일을 본다 (스톡이 그림으로 대체될 수 있음)
         if not png.exists():
+            if mp4.exists():
+                print(f"{name}: 스톡 영상 → 건너뜀")
+                continue
             raise FileNotFoundError(f"{png} 없음 (⑤ 이미지 단계가 먼저 필요)")
         digest = hashlib.sha1(png.read_bytes() +
                               f"|{tm['duration']}|{motion_for(no)}".encode()).hexdigest()
