@@ -3,8 +3,9 @@ import json
 from pathlib import Path
 
 
+# 읽을 때는 utf-8-sig: 메모장·PowerShell이 붙이는 BOM(﻿)이 있어도 없어도 같게 읽는다.
 def read_json(path: Path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def write_json(path: Path, data) -> None:
@@ -14,7 +15,7 @@ def write_json(path: Path, data) -> None:
 
 
 def read_text(path: Path) -> str:
-    return Path(path).read_text(encoding="utf-8")
+    return Path(path).read_text(encoding="utf-8-sig")
 
 
 def write_text(path: Path, text: str) -> None:

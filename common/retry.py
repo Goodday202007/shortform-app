@@ -2,10 +2,16 @@
 import time
 
 
+class NoRetry(RuntimeError):
+    """다시 해도 소용없는 오류 (잘못된 키, 권한 없음 등). retry()가 기다리지 않고 바로 올려 보낸다."""
+
+
 def retry(fn, tries: int = 3, wait: float = 3.0, what: str = "작업"):
     for i in range(1, tries + 1):
         try:
             return fn()
+        except NoRetry:
+            raise
         except Exception as e:
             if i == tries:
                 raise

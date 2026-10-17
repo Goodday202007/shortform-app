@@ -9,7 +9,7 @@ import requests
 
 from common.config import OUTPUTS, get_key
 from common.fileio import read_json, write_json
-from common.retry import retry
+from common.retry import NoRetry, retry
 
 CACHE = OUTPUTS / "_cache"
 CF_MODEL = "@cf/black-forest-labs/flux-1-schnell"
@@ -28,6 +28,8 @@ def cloudflare_image(prompt: str, steps: int = 4) -> bytes:
             f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/{CF_MODEL}",
             headers={"Authorization": f"Bearer {token}"},
             json={"prompt": prompt, "steps": steps}, timeout=120)
+        if r.status_code in (401, 403):   # 키 문제는 다시 해도 같다
+            raise NoRetry(f"Cloudflare HTTP {r.status_code}: 인증 실패")
         if r.status_code != 200:
             raise RuntimeError(f"Cloudflare HTTP {r.status_code}: {r.text[:200]}")
         body = r.json()
@@ -53,6 +55,35 @@ def pixabay_search(q: str) -> dict:
     if r.status_code != 200:
         raise RuntimeError(f"Pixabay HTTP {r.status_code}: {r.text[:200]}")
     data = r.json()
+    write_json(cache, data)
+    return data
+
+
+def tavily_search(query: str, max_results: int = 5, force: bool = False) -> dict:
+    """Tavily 검색(기본 깊이, 1크레딧). 같은 질문은 저장본을 쓴다 (월 1,000크레딧 한도 절약)."""
+    import hashlib
+    cache = CACHE / "tavily" / (hashlib.sha1(f"{query}|{max_results}".encode("utf-8")).hexdigest()[:16] + ".json")
+    if cache.exists() and not force:
+        return read_json(cache)
+    key = get_key("TAVILY_API_KEY")
+    if not key:
+        raise RuntimeError("Tavily 키가 .env에 없음")
+
+    def _call() -> dict:
+        r = requests.post(
+            "https://api.tavily.com/search",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"query": query, "search_depth": "basic", "max_results": max_results,
+                  "include_answer": True}, timeout=60)
+        if r.status_code in (401, 403):
+            raise NoRetry(f"Tavily HTTP {r.status_code}: 키가 올바르지 않음")
+        if r.status_code in (429, 432, 433):
+            raise NoRetry(f"Tavily HTTP {r.status_code}: 사용 한도 초과 (월 1,000크레딧)")
+        if r.status_code != 200:
+            raise RuntimeError(f"Tavily HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    data = retry(_call, tries=2, wait=2, what="Tavily 검색")
     write_json(cache, data)
     return data
 
