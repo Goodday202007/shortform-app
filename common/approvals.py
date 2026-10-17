@@ -19,8 +19,9 @@ RETURN_OPTIONS = {
 
 
 def record(run_dir: Path, stage: int, result: str, return_to: str | None = None,
-           comment: str = "") -> dict:
-    """승인/반려를 기록한다. 화면(Streamlit)이 승인·반려 버튼에서 부른다."""
+           comment: str = "", scenes: list[int] | None = None) -> dict:
+    """승인/반려를 기록한다. 화면(Streamlit)이 승인·반려 버튼에서 부른다.
+    scenes: 다시 만들 장면 번호(선택). 지금은 기록만 하고 단계들은 아직 읽지 않는다 (장면 단위 재생성 미구현)."""
     if stage not in RETURN_OPTIONS:
         raise ValueError(f"stage는 1 또는 2여야 합니다: {stage!r}")
     if result not in ("approved", "rejected"):
@@ -35,6 +36,10 @@ def record(run_dir: Path, stage: int, result: str, return_to: str | None = None,
         return_to = None
     entry = {"stage": stage, "result": result, "return_to": return_to, "comment": comment,
              "at": datetime.now().astimezone().isoformat()}     # 마이크로초 포함: 파일 시각과 정확히 비교
+    if scenes:
+        if result != "rejected" or not all(isinstance(n, int) and n >= 1 for n in scenes):
+            raise ValueError("scenes는 반려할 때만, 1 이상의 정수 목록으로 줄 수 있습니다")
+        entry["scenes"] = sorted(set(scenes))
     path = Path(run_dir) / "approvals.json"
     entries = read_json(path) if path.exists() else []
     entries.append(entry)

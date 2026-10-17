@@ -1,0 +1,6 @@
+[theme]
+# 기본 강조색이 빨강이라 '승인' 버튼이 경고처럼 보여서 파랑으로 바꾼다
+primaryColor = "#1f6feb"
+
+[browser]
+gatherUsageStats = false
