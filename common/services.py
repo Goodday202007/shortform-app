@@ -59,6 +59,36 @@ def pixabay_search(q: str) -> dict:
     return data
 
 
+def gemini_json(prompt: str, model: str = "gemini-3.5-flash-lite") -> dict:
+    """Gemini 무료 등급에 JSON 답을 요청한다. 공개된 주제·공개 자료만 넣을 것(입력이 제품 개선에 쓰일 수 있음).
+    429(분당 한도)는 10→20→40초 기다려 최대 4번 시도. JSON이 아니면 ValueError."""
+    import json
+    from google import genai
+    from google.genai import errors, types
+
+    key = get_key("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("Gemini 키가 .env에 없음")
+    client = genai.Client(api_key=key)
+    wait = 10
+    for attempt in range(4):
+        try:
+            r = client.models.generate_content(
+                model=model, contents=prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json"))
+            break
+        except errors.APIError as e:
+            if e.code == 429 and attempt < 3:
+                print(f"[Gemini] 429 한도 → {wait}초 기다림")
+                time.sleep(wait)
+                wait *= 2
+                continue
+            if e.code in (400, 401, 403):
+                raise NoRetry(f"Gemini HTTP {e.code}: 키 또는 요청이 올바르지 않음")
+            raise RuntimeError(f"Gemini HTTP {e.code}: {str(e)[:200]}")
+    return json.loads(r.text)
+
+
 def tavily_search(query: str, max_results: int = 5, force: bool = False) -> dict:
     """Tavily 검색(기본 깊이, 1크레딧). 같은 질문은 저장본을 쓴다 (월 1,000크레딧 한도 절약)."""
     import hashlib

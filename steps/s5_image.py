@@ -20,9 +20,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from common.config import FONTS
-from common.fileio import read_json, write_json
+from common.fileio import latest_script, read_json, write_json
 from common.services import CACHE, cloudflare_image, download, pixabay_search
-from steps.s4_voice import latest_script
 
 PROMPT_VER = "v1"
 # ⑥에서 정사각 그림을 가운데 9:16으로 자르므로 주인공을 가운데에 두라고 요청한다

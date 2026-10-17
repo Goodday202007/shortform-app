@@ -17,19 +17,11 @@ from pathlib import Path
 
 import edge_tts
 
-from common.fileio import read_json, write_json
+from common.fileio import latest_script, read_json, write_json
 from common.retry import retry
 
 VOICE = "ko-KR-SunHiNeural"
 MAX_CHARS = 18   # 자막 한 줄 최대 글자 수
-
-
-def latest_script(run_dir: Path) -> Path:
-    found = sorted(run_dir.glob("script_v*.json"),
-                   key=lambda p: int(re.search(r"script_v(\d+)", p.stem).group(1)))
-    if not found:
-        raise FileNotFoundError(f"{run_dir}에 script_v*.json이 없습니다")
-    return found[-1]
 
 
 def probe_duration(mp3: Path) -> float:
