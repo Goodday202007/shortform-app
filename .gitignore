@@ -1,0 +1,18 @@
+# 비밀 키
+.env
+
+# 가상환경·캐시
+.venv/
+__pycache__/
+*.pyc
+.cache/
+
+# 실행 결과물 (폴더 자체는 .gitkeep으로 유지)
+outputs/*
+!outputs/.gitkeep
+
+# 편집기·OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

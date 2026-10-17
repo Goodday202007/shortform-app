@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "title": "하루 10분 걷기의 효과",
+  "feedback": null,
+  "scenes": [
+    {
+      "no": 1,
+      "screen_text": "하루 10분, 걸으면 달라질까?",
+      "narration": "하루 10분 걷기만으로 몸에 어떤 변화가 생길까요?",
+      "source_ids": [],
+      "visual": "a person walking in a park, warm afternoon",
+      "type": "ai_image",
+      "unverified": false
+    },
+    {
+      "no": 2,
+      "screen_text": "식후 걷기, 혈당을 잡는다",
+      "narration": "식사 후에 걷으면 혈당이 오르는 속도가 완만해진다고 합니다.",
+      "source_ids": ["r1"],
+      "visual": "people walking on a city street after lunch",
+      "type": "stock",
+      "unverified": false
+    },
+    {
+      "no": 3,
+      "screen_text": "오늘부터 10분만",
+      "narration": "오늘 식사 후, 딱 십 분만 걸어 보세요.",
+      "source_ids": [],
+      "visual": "sneakers on a trail, soft morning light",
+      "type": "text_card",
+      "unverified": false
+    }
+  ]
+}

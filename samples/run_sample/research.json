@@ -1,0 +1,23 @@
+{
+  "topic": "하루 10분 걷기의 효과",
+  "summary": "[샘플] 짧은 걷기도 혈당과 기분에 도움이 된다는 내용의 가짜 요약.",
+  "sources": [
+    {
+      "id": "r1",
+      "claim": "[샘플] 식후 걷기는 혈당 상승을 완만하게 한다",
+      "url": "https://example.com/sample-1",
+      "link_status": "ok",
+      "link_ok": true
+    },
+    {
+      "id": "r2",
+      "claim": "[샘플] 가벼운 걷기는 기분 개선에 도움이 된다",
+      "url": "https://example.com/sample-2",
+      "link_status": "needs_review",
+      "link_ok": false
+    }
+  ],
+  "popular_refs": [
+    { "title": "[샘플] 10분 걷기 챌린지", "views": 120000, "duration_sec": 45 }
+  ]
+}

@@ -1,0 +1,16 @@
+[
+  {
+    "stage": 1,
+    "result": "rejected",
+    "return_to": "script",
+    "comment": "[샘플] 2번 장면 출처 부족",
+    "at": "2026-10-21T15:40:00+09:00"
+  },
+  {
+    "stage": 1,
+    "result": "approved",
+    "return_to": null,
+    "comment": "",
+    "at": "2026-10-21T15:55:00+09:00"
+  }
+]

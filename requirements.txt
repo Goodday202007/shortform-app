@@ -1,0 +1,7 @@
+streamlit==1.65.0
+moviepy==2.2.1
+edge-tts==7.3.1
+requests==2.34.2
+python-dotenv==1.2.4
+google-genai==2.31.0
+Pillow==11.3.0
