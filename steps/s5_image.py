@@ -311,7 +311,9 @@ def run(run_dir: Path) -> None:
         for i, how in enumerate(order):
             try:
                 if how == "stock":
-                    got = make_stock(sc, need.get(no), mp4, set(var["exclude"]))
+                    # 한 영상 안에서 같은 스톡 영상이 반복되지 않게, 다른 장면이 이미 쓴 영상은 제외한다
+                    used_elsewhere = {m.get("stock_id") for k, m in meta.items() if k != name and m.get("stock_id")}
+                    got = make_stock(sc, need.get(no), mp4, set(var["exclude"]) | used_elsewhere)
                     stock_id = got.pop("id")
                     credits[name] = got
                     kind = "mp4"

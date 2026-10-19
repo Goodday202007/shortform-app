@@ -101,24 +101,32 @@ def gemini_json(prompt: str, model: str = "gemini-3.5-flash-lite", images: list[
     return json.loads(r.text)
 
 
-def tavily_search(query: str, max_results: int = 5, force: bool = False) -> dict:
-    """Tavily 검색(기본 깊이, 1크레딧). 같은 질문은 저장본을 쓴다 (월 1,000크레딧 한도 절약)."""
+def tavily_search(query: str, max_results: int = 5, force: bool = False,
+                  exclude_domains: list[str] | None = None) -> dict:
+    """Tavily 검색(기본 깊이, 1크레딧). 같은 질문은 저장본을 쓴다 (월 1,000크레딧 한도 절약).
+    exclude_domains: 검색 결과에서 처음부터 뺄 사이트(SNS·영상 사이트는 근거로 부적합해 확인된 출처가 줄어든다)."""
     import hashlib
-    cache = CACHE / "tavily" / (hashlib.sha1(f"{query}|{max_results}".encode("utf-8")).hexdigest()[:16] + ".json")
+    exclude = sorted(exclude_domains or [])
+    cache_key = f"{query}|{max_results}" + (f"|-{','.join(exclude)}" if exclude else "")   # 제외 목록이 없으면 옛 저장본과 같은 키
+    cache = CACHE / "tavily" / (hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16] + ".json")
     if cache.exists() and not force:
         return read_json(cache)
     key = get_key("TAVILY_API_KEY")
     if not key:
         raise RuntimeError("Tavily 키가 .env에 없음")
 
+    payload = {"query": query, "search_depth": "basic", "max_results": max_results, "include_answer": True}
+    if exclude:
+        payload["exclude_domains"] = exclude
+
     def _call() -> dict:
         r = requests.post(
             "https://api.tavily.com/search",
-            headers={"Authorization": f"Bearer {key}"},
-            json={"query": query, "search_depth": "basic", "max_results": max_results,
-                  "include_answer": True}, timeout=60)
+            headers={"Authorization": f"Bearer {key}"}, json=payload, timeout=60)
         if r.status_code in (401, 403):
             raise NoRetry(f"Tavily HTTP {r.status_code}: 키가 올바르지 않음")
+        if r.status_code == 400:
+            raise NoRetry(f"Tavily HTTP 400: 요청 형식 오류 {r.text[:160]}")
         if r.status_code in (429, 432, 433):
             raise NoRetry(f"Tavily HTTP {r.status_code}: 사용 한도 초과 (월 1,000크레딧)")
         if r.status_code != 200:

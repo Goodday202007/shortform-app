@@ -25,7 +25,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 MAX_CLAIM = 200
 MAX_DETAIL = 900      # 출처 본문(detail)을 남기는 최대 글자 수
-MAX_RESULTS = 5
+MAX_RESULTS = 8       # 검색 1회=1크레딧이라 결과 수를 늘려도 크레딧은 같다 (링크 확인 시간만 늘어남)
 BOT_BLOCK = {401, 403, 429, 451, 999}   # 사이트가 자동 접속을 막는 것으로 보이는 코드
 # 링크가 살아 있어도(200) 근거로는 부적합한 사이트: 로그인 벽·자막 문구·개인 게시물이 많다.
 # ok로 두지 않고 needs_review로 낮춰 승인 ①에서 사람이 판단하게 한다.
@@ -99,7 +99,8 @@ def run(run_dir: Path, force: bool = False) -> None:
         raise ValueError("topic.txt가 비어 있음")
 
     print(f"검색: {topic!r}")
-    data = tavily_search(topic, max_results=MAX_RESULTS, force=force)
+    # SNS·영상 사이트는 검색 결과에서 처음부터 뺀다 (뒤에서 걸러내면 확인된 출처가 2~3개로 줄어 긴 대본의 근거가 모자란다)
+    data = tavily_search(topic, max_results=MAX_RESULTS, force=force, exclude_domains=list(WEAK_DOMAINS))
     results = [r for r in data.get("results", []) if r.get("url")]
     if data.get("usage"):
         print("Tavily 사용:", data["usage"])

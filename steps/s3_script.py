@@ -73,6 +73,19 @@ REVISE = """
 위 의견을 반영해 대본 전체를 다시 쓴다. 의견과 무관한 좋은 부분은 유지해도 된다."""
 
 
+STOCK_STOPWORDS = {"a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "with", "for", "his", "her", "their", "is"}
+MAX_STOCK_WORDS = 5
+
+
+def normalize_stock_query(sq: str) -> str:
+    """스톡 검색어를 코드가 고쳐 쓴다 (AI가 문장으로 길게 써도 영상 만들기가 멈추지 않게).
+    불용어(and, in, a …)를 빼고 앞 5단어만 남긴다. 한글이 섞였거나 영어 단어가 하나도 없으면 빈 문자열(→ 다시 요청)."""
+    if not sq or re.search(r"[가-힣]", sq):
+        return ""
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\-]*", sq) if w.lower() not in STOCK_STOPWORDS]
+    return " ".join(words[:MAX_STOCK_WORDS])
+
+
 def format_sources(ok: list[dict]) -> str:
     """Gemini에 넘길 확인된 출처 목록. 원문(detail)이 있으면 함께 준다 (공개된 웹 자료만)."""
     lines = []
@@ -84,6 +97,19 @@ def format_sources(ok: list[dict]) -> str:
 
 
 # ---------- 코드 검증 ----------
+def coerce_top_level(raw, topic: str):
+    """Gemini가 가끔 JSON 객체 대신 배열로 답한다(실제 60초 시험에서 두 번 연속 발생).
+    - [ {title, scenes} ]            → 그 객체
+    - [ {no, screen_text, …}, … ]    → {"title": 주제, "scenes": 배열}
+    그 밖의 형태는 그대로 돌려줘 검증이 오류로 처리한다."""
+    if isinstance(raw, list) and raw and all(isinstance(x, dict) for x in raw):
+        if len(raw) == 1 and "scenes" in raw[0]:
+            return raw[0]
+        if all("no" in x and "narration" in x for x in raw):
+            return {"title": topic, "scenes": raw}
+    return raw
+
+
 def enforce_stock_ratio(clean: list[dict]) -> list[str]:
     """stock 이 전체의 2/3 를 넘으면 초과분을 ai_image 로 바꾼다 (장면 3개 이상일 때).
     프롬프트로 부탁해도 어기는 경우가 있어 코드가 강제한다. 첫·마지막 장면은 가급적 stock 으로 두고,
@@ -110,7 +136,7 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int, topic: str = "
     오류가 있으면 장면 목록은 None → 다시 요청한다. topic: 주제에 이미 들어 있는 숫자는 근거 없이도 허용한다."""
     errs, warns = [], []
     if not isinstance(data, dict):
-        return None, ["최상위가 JSON 객체가 아님"], warns
+        return None, [f"최상위가 JSON 객체가 아님 (받은 형태: {type(data).__name__})"], warns
     if not isinstance(data.get("title"), str) or not data["title"].strip():
         errs.append("title이 없거나 비어 있음")
     scenes = data.get("scenes")
@@ -151,9 +177,12 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int, topic: str = "
             warns.append(f"{i}번 장면: text_card 대신 ai_image 로 바꿈")
             stype = "ai_image"
         if stype == "stock":
-            n_words = len(sq.split())
-            if not (1 <= n_words <= 5 and STOCK_QUERY_OK.match(sq)):
-                errs.append(f"{i}번 장면(stock)의 stock_query는 영어 단어 1~5개여야 함: {sq!r}")
+            fixed = normalize_stock_query(sq)
+            if not fixed:
+                errs.append(f"{i}번 장면(stock)의 stock_query는 영어 단어여야 함: {sq!r}")
+            elif fixed != sq:
+                warns.append(f"{i}번 장면: stock_query 를 {sq!r} → {fixed!r} 로 고침")
+                sq = fixed
         else:
             sq = ""
 
@@ -228,10 +257,11 @@ def run(run_dir: Path, scenes: int = 3, seconds: int = 14, force: bool = False) 
         print(f"반려 의견 반영: {feedback!r}")
         prompt += REVISE.format(prev=json.dumps(prev["scenes"], ensure_ascii=False), feedback=feedback)
 
-    data = None
+    data, last_raw = None, None
     for attempt in (1, 2):                      # 형식이 틀리면 한 번만 다시 요청
         try:
-            raw = gemini_json(prompt, MODEL)
+            last_raw = gemini_json(prompt, MODEL)
+            raw = coerce_top_level(last_raw, topic)
             clean, errs, warns = check_and_clean(raw, scenes, ok_ids, target, topic)
         except ValueError as e:                 # JSON이 아님
             clean, errs, warns = None, [f"JSON 해석 실패: {e}"], []
@@ -243,7 +273,10 @@ def run(run_dir: Path, scenes: int = 3, seconds: int = 14, force: bool = False) 
         print(f"  검증 실패({attempt}/2):", errs)
         prompt += "\n\n[이전 답의 문제] " + "; ".join(errs) + "\n형식과 규칙을 정확히 지켜 다시 답해라."
     if data is None:
-        raise RuntimeError("대본 형식이 두 번 모두 틀려 중단: " + "; ".join(errs))
+        # 원인 분석을 위해 마지막 원본 응답을 남긴다 (공개 주제의 대본 응답이라 민감 정보 없음)
+        write_json(run_dir / "script_failed_response.json", {"errors": errs, "response": last_raw})
+        raise RuntimeError("대본 형식이 두 번 모두 틀려 중단: " + "; ".join(errs)
+                           + " (원본 응답: script_failed_response.json)")
 
     out = {"version": version, "title": data["title"], "feedback": feedback,
            "scenes": data["scenes"]}
