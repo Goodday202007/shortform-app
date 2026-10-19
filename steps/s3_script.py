@@ -51,8 +51,10 @@ PROMPT = """너는 한국어 숏폼(9:16) 영상 대본 작가다. 공개된 주
     visual 작성 규칙: 빛·화면·그래프·호르몬 같은 추상적인 대상을 그리지 않는다. 기기 화면이나 빛을 클로즈업하지 않는다.
     대신 '누가, 어디서, 무엇을 하는지'가 보이는 구체적인 일상 장면을 쓴다(예: "a tired woman sitting on her bed at night looking at a phone, her face lit by the screen glow").
   · stock: 실제 촬영 영상이 더 자연스러운 장면(사람의 움직임·도시·자연). stock_query에 영어 명사 키워드 2~3개를 쓴다(예: "sleeping bed smartphone"). 흔한 단어만, 문장 금지. visual에는 스톡을 못 찾을 때 AI가 대신 그릴 영어 설명 문장을 적는다.
-  · text_card: 핵심 문구를 글자로만 강조하는 장면(보통 마지막). stock_query는 빈 문자열, visual은 짧은 영어 문장.
-  · stock은 전체의 절반 이하, ai_image는 최소 1개.
+  · text_card는 쓰지 않는다(스톡·그림을 못 구할 때 프로그램이 대신 쓰는 최후 수단이다). 마지막 장면도 stock이나 ai_image로 한다.
+    핵심 문구는 screen_text가 화면 위쪽에 크게 보여 준다.
+  · stock은 전체의 1/3 이상 2/3 이하, ai_image는 최소 1개. 마지막 장면(행동 권유)은 실제 영상인 stock을 우선 고려한다.
+  · stock의 stock_query는 '누가/무엇이 + 동작' 순서로 쓰고, 사람이 주제면 person·runner·woman 같은 단어를 넣는다(동물 영상이 걸리지 않게).
 - 첫 장면은 시청자의 호기심을 끄는 질문이나 한마디로 시작한다. 마지막 장면은 행동 권유로 끝낸다.
 - 어려운 전문용어는 쉬운 말로 풀어 쓴다."""
 
@@ -109,7 +111,11 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int):
 
         # 스톡 장면은 Pixabay에 보낼 영어 키워드가 꼭 있어야 한다 (설명 문장을 잘라 쓰면 엉뚱한 영상이 걸린다)
         sq = s["stock_query"].strip() if isinstance(s["stock_query"], str) else ""
-        if s["type"] == "stock":
+        stype = s["type"]
+        if stype == "text_card":      # 글자 카드는 밋밋해서 쓰지 않는다 → 그림(ai_image)으로 바꾼다 (화면 글자는 위쪽에 따로 나옴)
+            warns.append(f"{i}번 장면: text_card 대신 ai_image 로 바꿈")
+            stype = "ai_image"
+        if stype == "stock":
             n_words = len(sq.split())
             if not (1 <= n_words <= 5 and STOCK_QUERY_OK.match(sq)):
                 errs.append(f"{i}번 장면(stock)의 stock_query는 영어 단어 1~5개여야 함: {sq!r}")
@@ -130,7 +136,7 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int):
             warns.append(f"{i}번 장면 screen_text가 {len(s['screen_text'])}자로 김")
         clean.append({"no": i, "screen_text": s["screen_text"].strip(), "narration": narr,
                       "source_ids": ids, "visual": s["visual"].strip(), "stock_query": sq,
-                      "type": s["type"], "unverified": unverified})
+                      "type": stype, "unverified": unverified})
     if errs:
         return None, errs, warns
     return clean, errs, warns

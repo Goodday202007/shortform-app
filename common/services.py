@@ -59,8 +59,9 @@ def pixabay_search(q: str) -> dict:
     return data
 
 
-def gemini_json(prompt: str, model: str = "gemini-3.5-flash-lite") -> dict:
+def gemini_json(prompt: str, model: str = "gemini-3.5-flash-lite", images: list[bytes] | None = None) -> dict:
     """Gemini 무료 등급에 JSON 답을 요청한다. 공개된 주제·공개 자료만 넣을 것(입력이 제품 개선에 쓰일 수 있음).
+    images: JPEG 이미지 바이트 목록(공개 스톡 썸네일 등)을 함께 보여 줄 때.
     429(분당 한도)는 10→20→40초 기다려 최대 4번 시도. JSON이 아니면 ValueError."""
     import json
     from google import genai
@@ -70,11 +71,12 @@ def gemini_json(prompt: str, model: str = "gemini-3.5-flash-lite") -> dict:
     if not key:
         raise RuntimeError("Gemini 키가 .env에 없음")
     client = genai.Client(api_key=key)
+    contents = [prompt] + [types.Part.from_bytes(data=b, mime_type="image/jpeg") for b in (images or [])]
     wait = 10
     for attempt in range(4):
         try:
             r = client.models.generate_content(
-                model=model, contents=prompt,
+                model=model, contents=contents,
                 config=types.GenerateContentConfig(response_mime_type="application/json"))
             break
         except errors.APIError as e:
