@@ -7,6 +7,7 @@ from pathlib import Path
 
 import requests
 
+from common import usage
 from common.config import OUTPUTS, get_key
 from common.fileio import read_json, write_json
 from common.retry import NoRetry, retry
@@ -39,6 +40,7 @@ def cloudflare_image(prompt: str, steps: int = 4) -> bytes:
         body = r.json()
         if "image" not in body.get("result", {}):
             raise RuntimeError(f"Cloudflare 응답 형식 이상: {str(body)[:200]}")
+        usage.log_call("cloudflare", note=f"steps={steps}")          # 그림이 실제로 만들어졌을 때만 센다
         return base64.b64decode(body["result"]["image"])
 
     return retry(_call, tries=2, wait=2, what="Cloudflare 그림")
@@ -57,7 +59,9 @@ def pixabay_search(q: str) -> dict:
         PIXABAY_API, params={"key": key, "q": q[:100], "per_page": 20, "safesearch": "true"},
         timeout=30), tries=2, wait=2, what="Pixabay 검색")
     if r.status_code != 200:
+        usage.log_call("pixabay", ok=False, note=f"HTTP {r.status_code}")
         raise RuntimeError(f"Pixabay HTTP {r.status_code}: {r.text[:200]}")
+    usage.log_call("pixabay", note=q[:40])
     data = r.json()
     write_json(cache, data)
     return data
@@ -82,8 +86,10 @@ def gemini_json(prompt: str, model: str = "gemini-3.5-flash-lite", images: list[
             r = client.models.generate_content(
                 model=model, contents=contents,
                 config=types.GenerateContentConfig(response_mime_type="application/json"))
+            usage.log_call("gemini", note=model + (f" +이미지{len(images)}" if images else ""))
             break
         except errors.APIError as e:
+            usage.log_call("gemini", ok=False, note=f"HTTP {e.code}")
             if e.code == 429 and attempt < 3:
                 print(f"[Gemini] 429 한도 → {wait}초 기다림")
                 time.sleep(wait)
@@ -117,6 +123,7 @@ def tavily_search(query: str, max_results: int = 5, force: bool = False) -> dict
             raise NoRetry(f"Tavily HTTP {r.status_code}: 사용 한도 초과 (월 1,000크레딧)")
         if r.status_code != 200:
             raise RuntimeError(f"Tavily HTTP {r.status_code}: {r.text[:200]}")
+        usage.log_call("tavily", note=query[:40])
         return r.json()
 
     data = retry(_call, tries=2, wait=2, what="Tavily 검색")

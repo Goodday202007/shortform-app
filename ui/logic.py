@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from common import approvals, runlock
+from common import approvals, runlock, usage
 from common.config import OUTPUTS, ROOT, STEPS
 from common.fileio import read_json, read_text, script_versions
 
@@ -168,6 +168,15 @@ def scene_sources(run_dir: Path) -> dict[str, str]:
     p = run_dir / "scenes" / "_image_meta.json"
     return {k: v.get("used", "?") + (" (대체)" if v.get("fallback") else "")
             for k, v in read_json(p).items()} if p.exists() else {}
+
+
+def usage_rows() -> list[dict]:
+    """사이드바의 무료 한도 사용량. 기록 파일이 없으면 저장 파일로 과거분을 한 번 추정해 채운다. 실패해도 화면은 계속된다."""
+    try:
+        usage.backfill_from_files()
+        return usage.summarize()
+    except Exception:
+        return []
 
 
 def progress_ratio(st: dict) -> float:

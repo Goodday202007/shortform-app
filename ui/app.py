@@ -68,9 +68,43 @@ def sidebar() -> Path | None:
                                       format_func=lambda n: logic.run_label(OUTPUTS / n))
         if choice and (not current or choice != current.name):
             go_run(OUTPUTS / choice)
+    usage_panel()
     st.sidebar.caption("무료 도구만 사용합니다. 공개된 주제만 입력하세요 "
                        "(Gemini 무료 등급은 입력이 제품 개선에 쓰일 수 있습니다).")
     return current
+
+
+def usage_panel() -> None:
+    """무료 한도 사용량. 이 PC의 이 앱이 실제로 외부 서비스에 보낸 호출만 센 값이다 (저장본 재사용은 세지 않음)."""
+    rows = logic.usage_rows()
+    if not rows:
+        return
+    with st.sidebar.expander("📊 무료 한도 사용량", expanded=True):
+        for r in rows:
+            per_min = r["window"] == "최근 60초"          # Pixabay: 분당 한도만 있다
+            used = r["used"]
+            if r["limit"]:
+                ratio = min(1.0, used / r["limit"])
+                st.markdown(f"**{r['label']}** {used} / {r['limit']}{r['unit']}"
+                            + ("  ⚠️ 한도에 가까움" if ratio >= 0.8 else ""))
+                st.progress(ratio)
+            elif per_min:
+                st.markdown(f"**{r['label']}** 최근 1분 {used} / {r['per_minute']}{r['unit']}")
+                st.progress(min(1.0, used / r["per_minute"]))
+            else:
+                st.markdown(f"**{r['label']}** 오늘 {used}{r['unit']}"
+                            + (f"  · 최근 1분 {r['last_minute']}/{r['per_minute']}" + ("  ⚠️" if r["last_minute"] >= 12 else "")
+                               if r["per_minute"] else ""))
+                if r["per_minute"]:
+                    st.progress(min(1.0, r["last_minute"] / r["per_minute"]))
+            cap = [] if per_min else [r["window"]]
+            if r["estimated"]:
+                cap.append(f"과거 {r['estimated']}회는 저장 파일로 추정")
+            if r["fails"]:
+                cap.append(f"실패·대기 {r['fails']}회")
+            if cap:
+                st.caption(" · ".join(cap))
+        st.caption("이 앱이 보낸 호출만 센 추정치입니다. 정확한 값은 각 서비스 대시보드에서 확인하세요.")
 
 
 # ---------- 화면들 ----------
