@@ -1,9 +1,12 @@
-"""승인 ①②의 기록과 판정. approvals.json 은 항목을 쌓기만 한다 (고치거나 지우지 않는다).
+"""승인의 기록과 판정. approvals.json 은 항목을 쌓기만 한다 (고치거나 지우지 않는다).
 
   [{"stage": 1, "result": "rejected", "return_to": "script", "comment": "…", "at": "ISO 시각"}]
 
-- 승인 ①은 '가장 최신 대본', 승인 ②는 'final.mp4'를 심사한다.
-- 기록이 심사 대상 파일보다 먼저 만들어졌다면(= 그 뒤에 대본·영상이 새로 만들어졌다면)
+- stage 1 = 승인 ① 출처·대본   → 심사 대상: 가장 최신 대본
+- stage 3 = 이미지 확인        → 심사 대상: scenes/_image_meta.json (⑤가 장면 그림·영상을 만들 때마다 갱신)
+- stage 2 = 승인 ② 완성 영상   → 심사 대상: final.mp4
+  (번호는 기록 호환을 위해 승인 ②를 2로 유지하고, 나중에 생긴 이미지 확인을 3으로 둔다. 실행 순서는 1→3→2)
+- 기록이 심사 대상 파일보다 먼저 만들어졌다면(= 그 뒤에 대본·그림·영상이 새로 만들어졌다면)
   옛 대상에 대한 판정이므로 무효이고, 다시 승인을 기다린다 ("pending").
 """
 from datetime import datetime
@@ -11,33 +14,38 @@ from pathlib import Path
 
 from common.fileio import latest_script, read_json, write_json
 
-# 승인 단계별로 되돌아갈 수 있는 단계. ①은 대본만 심사하므로 대본으로만 돌아간다.
+# 승인 단계별로 되돌아갈 수 있는 단계. ①은 대본만, 이미지 확인은 이미지 단계로만 돌아간다.
 RETURN_OPTIONS = {
     1: ["script"],
     2: ["script", "voice", "image", "motion", "compose"],
+    3: ["image"],
 }
 
 
 def record(run_dir: Path, stage: int, result: str, return_to: str | None = None,
            comment: str = "", scenes: list[int] | None = None) -> dict:
     """승인/반려를 기록한다. 화면(Streamlit)이 승인·반려 버튼에서 부른다.
-    scenes: 다시 만들 장면 번호(선택). 지금은 기록만 하고 단계들은 아직 읽지 않는다 (장면 단위 재생성 미구현)."""
+    scenes: 다시 만들 장면 번호. 이미지 확인(stage 3)의 반려에는 꼭 필요하고, 다른 단계에서는 기록만 한다.
+    (이미지 단계의 실제 재생성은 steps.s5_image.request_redo 가 맡는다.)"""
     if stage not in RETURN_OPTIONS:
-        raise ValueError(f"stage는 1 또는 2여야 합니다: {stage!r}")
+        raise ValueError(f"stage는 1, 2, 3 중 하나여야 합니다: {stage!r}")
     if result not in ("approved", "rejected"):
         raise ValueError(f"result는 approved/rejected 중 하나여야 합니다: {result!r}")
     comment = " ".join((comment or "").split())
     if result == "rejected":
         if return_to not in RETURN_OPTIONS[stage]:
             raise ValueError(f"승인 {stage} 반려 시 되돌아갈 단계는 {RETURN_OPTIONS[stage]} 중 하나: {return_to!r}")
-        if not comment:
+        if stage == 3:
+            if not scenes:
+                raise ValueError("다시 만들 장면을 하나 이상 골라 주세요")
+        elif not comment:
             raise ValueError("반려할 때는 의견을 적어 주세요 (대본을 고쳐 쓰는 데 쓰입니다)")
     else:
         return_to = None
     entry = {"stage": stage, "result": result, "return_to": return_to, "comment": comment,
              "at": datetime.now().astimezone().isoformat()}     # 마이크로초 포함: 파일 시각과 정확히 비교
     if scenes:
-        if result != "rejected" or not all(isinstance(n, int) and n >= 1 for n in scenes):
+        if result != "rejected" or not all(isinstance(n, int) and not isinstance(n, bool) and n >= 1 for n in scenes):
             raise ValueError("scenes는 반려할 때만, 1 이상의 정수 목록으로 줄 수 있습니다")
         entry["scenes"] = sorted(set(scenes))
     path = Path(run_dir) / "approvals.json"
@@ -51,7 +59,12 @@ def gate_state(run_dir: Path, stage: int) -> tuple[str, dict | None]:
     """('approved' | 'rejected' | 'pending', 마지막 유효 기록)"""
     run_dir = Path(run_dir)
     try:
-        artifact = latest_script(run_dir) if stage == 1 else run_dir / "final.mp4"
+        if stage == 1:
+            artifact = latest_script(run_dir)
+        elif stage == 3:
+            artifact = run_dir / "scenes" / "_image_meta.json"
+        else:
+            artifact = run_dir / "final.mp4"
     except FileNotFoundError:
         return "pending", None
     path = run_dir / "approvals.json"

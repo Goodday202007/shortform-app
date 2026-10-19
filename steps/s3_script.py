@@ -31,12 +31,13 @@ PROMPT = """너는 한국어 숏폼(9:16) 영상 대본 작가다. 공개된 주
 주제: {topic}
 
 [확인된 출처] — 사실은 반드시 여기에 있는 내용만 쓴다. 여기에 없는 사실·수치는 만들지 않는다.
+각 출처는 한 줄 요약(claim)과, 있다면 자료 원문(원문)을 함께 준다. 원문에서 구체적인 수치·원리·예시를 찾아 쓴다.
 {sources}
 
 장면 {n}개, 전체 약 {seconds}초짜리 대본을 JSON으로만 답한다.
 {{"title": "영상 제목", "scenes": [
   {{"no": 1, "screen_text": "화면에 띄울 짧은 글자(15자 안팎)",
-    "narration": "읽을 대사 한 문장({lo}~{hi}자)",
+    "narration": "읽을 대사 1~2문장({lo}~{hi}자)",
     "makes_claim": true 또는 false,
     "source_ids": ["r1"],
     "visual": "영어 설명",
@@ -46,6 +47,7 @@ PROMPT = """너는 한국어 숏폼(9:16) 영상 대본 작가다. 공개된 주
 규칙:
 - makes_claim: 그 장면의 대사가 사실·수치·효과를 주장하면 true, 질문·도입·행동 권유처럼 사실 주장이 없으면 false.
 - source_ids: 사실을 주장하는 장면은 위 출처의 id를 근거로 넣는다. 사실 주장이 없는 장면은 빈 배열.
+  출처가 없는 장면(도입·행동 권유)에는 출처에 없는 수치(속도·횟수·시간·칼로리 등)를 쓰지 않는다.
 - type과 visual:
   · ai_image(기본): AI가 사진처럼 그릴 장면. visual은 주제가 크고 가운데에 오는 구체적인 영어 문장(예: "a person walking along a park path, warm afternoon light"). stock_query는 빈 문자열.
     visual 작성 규칙: 빛·화면·그래프·호르몬 같은 추상적인 대상을 그리지 않는다. 기기 화면이나 빛을 클로즈업하지 않는다.
@@ -55,7 +57,9 @@ PROMPT = """너는 한국어 숏폼(9:16) 영상 대본 작가다. 공개된 주
     핵심 문구는 screen_text가 화면 위쪽에 크게 보여 준다.
   · stock은 전체의 1/3 이상 2/3 이하, ai_image는 최소 1개. 마지막 장면(행동 권유)은 실제 영상인 stock을 우선 고려한다.
   · stock의 stock_query는 '누가/무엇이 + 동작' 순서로 쓰고, 사람이 주제면 person·runner·woman 같은 단어를 넣는다(동물 영상이 걸리지 않게).
-- 첫 장면은 시청자의 호기심을 끄는 질문이나 한마디로 시작한다. 마지막 장면은 행동 권유로 끝낸다.
+- 구성: 첫 장면은 호기심을 끄는 질문이나 한마디(후크). 가운데 장면들은 정보를 하나씩 풀어 간다. 마지막 장면은 행동 권유로 끝낸다.
+- 상세함: 정보 장면의 대사에는 수치·원리(왜 그런지)·구체적인 예시 중 최소 하나를 넣는다. "좋아집니다"처럼 막연한 말만 쓰지 않는다.
+  같은 출처의 같은 내용을 장면마다 반복하지 않고, 장면마다 서로 다른 정보를 준다.
 - 어려운 전문용어는 쉬운 말로 풀어 쓴다."""
 
 REVISE = """
@@ -69,10 +73,41 @@ REVISE = """
 위 의견을 반영해 대본 전체를 다시 쓴다. 의견과 무관한 좋은 부분은 유지해도 된다."""
 
 
+def format_sources(ok: list[dict]) -> str:
+    """Gemini에 넘길 확인된 출처 목록. 원문(detail)이 있으면 함께 준다 (공개된 웹 자료만)."""
+    lines = []
+    for s in ok:
+        lines.append(f"- {s['id']}: {s['claim']}")
+        if s.get("detail"):
+            lines.append(f"  원문: {s['detail']}")
+    return "\n".join(lines)
+
+
 # ---------- 코드 검증 ----------
-def check_and_clean(data: dict, n: int, ok_ids: set, target: int):
+def enforce_stock_ratio(clean: list[dict]) -> list[str]:
+    """stock 이 전체의 2/3 를 넘으면 초과분을 ai_image 로 바꾼다 (장면 3개 이상일 때).
+    프롬프트로 부탁해도 어기는 경우가 있어 코드가 강제한다. 첫·마지막 장면은 가급적 stock 으로 두고,
+    가운데 장면을 하나 걸러 하나씩 바꿔 그림 장면이 몰리지 않게 한다. (visual 은 이미 그림 설명 문장이다.)"""
+    n = len(clean)
+    if n < 3:
+        return []
+    stock_idx = [k for k, c in enumerate(clean) if c["type"] == "stock"]
+    excess = len(stock_idx) - (2 * n) // 3
+    if excess <= 0:
+        return []
+    middle = [k for k in stock_idx if 0 < k < n - 1]
+    order = middle[::2] + middle[1::2]
+    order += [k for k in stock_idx if k not in order]
+    msgs = []
+    for k in order[:excess]:
+        clean[k]["type"], clean[k]["stock_query"] = "ai_image", ""
+        msgs.append(f"{clean[k]['no']}번 장면: stock 이 너무 많아 ai_image 로 바꿈")
+    return msgs
+
+
+def check_and_clean(data: dict, n: int, ok_ids: set, target: int, topic: str = ""):
     """AI 답을 검사해 (정리된 장면 목록, 오류 목록, 경고 목록)을 돌려준다.
-    오류가 있으면 장면 목록은 None → 다시 요청한다."""
+    오류가 있으면 장면 목록은 None → 다시 요청한다. topic: 주제에 이미 들어 있는 숫자는 근거 없이도 허용한다."""
     errs, warns = [], []
     if not isinstance(data, dict):
         return None, ["최상위가 JSON 객체가 아님"], warns
@@ -129,9 +164,13 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int):
             warns.append(f"{i}번 장면: 확인되지 않은 출처 id {bad} 제거")
 
         # 사실을 말하는데 확인된 출처가 없으면 미확인 → 영상에서 뺀다.
-        # 퍼센트 수치는 AI가 makes_claim=false 라고 해도 사실 주장으로 본다.
-        numeric = "%" in narr or "퍼센트" in narr
+        # AI가 makes_claim=false 라고 해도, 퍼센트이거나 주제에 없는 숫자(예: "시속 8km", "900kcal")가 나오면
+        # 출처 없는 수치를 단정하는 것이므로 사실 주장으로 본다.
+        new_numbers = set(re.findall(r"\d+", narr)) - set(re.findall(r"\d+", topic))
+        numeric = "%" in narr or "퍼센트" in narr or bool(new_numbers)
         unverified = (bool(s["makes_claim"]) or numeric) and not ids
+        if unverified and not s["makes_claim"]:
+            warns.append(f"{i}번 장면: 출처 없이 수치를 말해 미확인 처리 ({sorted(new_numbers) or '퍼센트'})")
         if len(s["screen_text"]) > 24:
             warns.append(f"{i}번 장면 screen_text가 {len(s['screen_text'])}자로 김")
         clean.append({"no": i, "screen_text": s["screen_text"].strip(), "narration": narr,
@@ -139,6 +178,7 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int):
                       "type": stype, "unverified": unverified})
     if errs:
         return None, errs, warns
+    warns += enforce_stock_ratio(clean)
     return clean, errs, warns
 
 
@@ -183,7 +223,7 @@ def run(run_dir: Path, scenes: int = 3, seconds: int = 14, force: bool = False) 
 
     prompt = PROMPT.format(
         topic=topic, n=scenes, seconds=seconds, lo=int(target * 0.7), hi=int(target * 1.3),
-        sources="\n".join(f"- {s['id']}: {s['claim']}" for s in ok) or "(확인된 출처 없음)")
+        sources=format_sources(ok) or "(확인된 출처 없음)")
     if feedback is not None and prev is not None:
         print(f"반려 의견 반영: {feedback!r}")
         prompt += REVISE.format(prev=json.dumps(prev["scenes"], ensure_ascii=False), feedback=feedback)
@@ -192,7 +232,7 @@ def run(run_dir: Path, scenes: int = 3, seconds: int = 14, force: bool = False) 
     for attempt in (1, 2):                      # 형식이 틀리면 한 번만 다시 요청
         try:
             raw = gemini_json(prompt, MODEL)
-            clean, errs, warns = check_and_clean(raw, scenes, ok_ids, target)
+            clean, errs, warns = check_and_clean(raw, scenes, ok_ids, target, topic)
         except ValueError as e:                 # JSON이 아님
             clean, errs, warns = None, [f"JSON 해석 실패: {e}"], []
         for w in warns:

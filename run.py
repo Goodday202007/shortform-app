@@ -1,6 +1,6 @@
 r"""전체 실행기. 단계를 순서대로 돌리고 진행 상황을 status.json 에 적는다.
 
-  topic → research → script → [승인 ①] → voice → image → motion → compose → [승인 ②]
+  topic → research → script → [승인 ①] → voice → image → [이미지 확인] → motion → compose → [승인 ②]
 
 사용 예)
   .venv\Scripts\python run.py --run outputs\20261021_1530_r001            # 이어서 실행 (끝난 단계는 건너뜀)
@@ -11,6 +11,7 @@ r"""전체 실행기. 단계를 순서대로 돌리고 진행 상황을 status.j
 승인 ①②: 승인 기록이 없으면 'waiting' 상태로 멈추고 종료한다. 앱이 common.approvals.record()로
 approvals.json 에 승인/반려를 적은 뒤 run.py 를 다시 실행하면 이어서 진행하거나, 반려된 단계부터 다시 돌린다.
   - 승인 ①은 대본만 심사하므로 반려하면 script 로 돌아간다 (새 버전 script_v2.json … 이 만들어진다).
+  - 이미지 확인은 장면 그림·영상을 보고, 마음에 안 드는 장면만 골라 image 로 돌아가 다시 만든다.
   - 승인 ②는 script/voice/image/motion/compose 중 고른 단계로 돌아간다.
 
 status.json:  {"current": 단계, "done": [끝난 단계], "error": 메시지|null,
@@ -27,7 +28,7 @@ from common import approvals, runlock
 from common.config import STEPS as ORDER
 from common.fileio import read_json, write_json
 
-GATES = {"approval1": 1, "approval2": 2}
+GATES = {"approval1": 1, "approval_images": 3, "approval2": 2}
 MODULES = {
     "topic": "steps.s1_topic", "research": "steps.s2_research", "script": "steps.s3_script",
     "voice": "steps.s4_voice", "image": "steps.s5_image", "motion": "steps.s6_motion",
@@ -95,6 +96,10 @@ def run_pipeline(run_dir: Path, start: str | None = None, only: str | None = Non
             print(f"== [{only}] 한 단계만 실행함 (뒤 단계는 다시 만들지 않았습니다)")
         return 0 if ok else 1
 
+    if start is None and st["state"] == "done":
+        # 이미 완료된 실행은 되감지 않는다 (이미지 확인 단계가 생기기 전에 끝난 폴더에도 안전하게)
+        print("== 모든 단계가 이미 끝났습니다")
+        return 0
     if start is None:                       # 기본: 아직 안 끝난 첫 단계부터 이어서
         start = next((s for s in ORDER if s not in st["done"]), None)
         if start is None:

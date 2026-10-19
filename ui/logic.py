@@ -16,16 +16,19 @@ RUN_NAME = re.compile(r"^\d{8}_\d{4}_r\d{3}$")
 STEP_LABELS = {
     "topic": "① 주제", "research": "② 조사·출처 확인", "script": "③ 대본",
     "approval1": "승인 ① 출처·대본", "voice": "④ 음성·자막", "image": "⑤ 이미지",
-    "motion": "⑥ 영상화", "compose": "⑦ 합성", "approval2": "승인 ② 영상",
+    "approval_images": "이미지 확인", "motion": "⑥ 영상화", "compose": "⑦ 합성", "approval2": "승인 ② 영상",
 }
 # 진행 표시줄용 짧은 이름 (칸이 좁아 줄바꿈되지 않게)
 STEP_SHORT = {
     "topic": "① 주제", "research": "② 조사", "script": "③ 대본", "approval1": "승인 ①",
-    "voice": "④ 음성", "image": "⑤ 이미지", "motion": "⑥ 영상화", "compose": "⑦ 합성", "approval2": "승인 ②",
+    "voice": "④ 음성", "image": "⑤ 이미지", "approval_images": "이미지 확인", "motion": "⑥ 영상화",
+    "compose": "⑦ 합성", "approval2": "승인 ②",
 }
+# 길이가 길수록 대본이 상세해진다 (한국어 음성은 1초에 약 6.5자라 짧은 영상은 담을 내용이 적다).
 PRESETS = {
-    "개발용 · 장면 3개, 약 14초 (빠르고 한도 절약)": (3, 14),
-    "최종용 · 장면 9개, 약 60초 (한도를 많이 씀)": (9, 60),
+    "표준 · 장면 6개, 약 35초 (대본이 꽤 상세함)": (6, 35),
+    "개발용 · 장면 3개, 약 14초 (빠르고 한도 절약, 대본이 짧음)": (3, 14),
+    "최종용 · 장면 9개, 약 60초 (가장 상세, 한도를 많이 씀)": (9, 60),
 }
 # 승인 ② 반려 시 되돌아갈 단계 (사용자가 이해하는 말로)
 RETURN_LABELS = {
@@ -71,7 +74,7 @@ def read_status(run_dir: Path) -> dict:
 
 
 def stage_of(run_dir: Path) -> str:
-    """지금 보여 줄 화면: no_topic | ready | running | interrupted | error | approval1 | approval2 | done"""
+    """지금 보여 줄 화면: no_topic | ready | running | interrupted | error | approval1 | approval_images | approval2 | done"""
     if runlock.is_running(run_dir):
         return "running"
     if not topic_of(run_dir):
@@ -82,7 +85,7 @@ def stage_of(run_dir: Path) -> str:
         return "interrupted"           # status는 '실행 중'인데 프로세스가 없다 = 중간에 죽음
     if state == "error":
         return "error"
-    if state == "waiting" and st["current"] in ("approval1", "approval2"):
+    if state == "waiting" and st["current"] in ("approval1", "approval_images", "approval2"):
         return st["current"]
     if state == "done":
         return "done"
@@ -171,7 +174,46 @@ def progress_ratio(st: dict) -> float:
     return min(1.0, len([s for s in st["done"] if s in STEPS]) / len(STEPS))
 
 
+def image_check_items(run_dir: Path) -> list[dict]:
+    """이미지 확인 화면용: 장면마다 만들어진 그림(png)·영상(mp4)과 설명. 영상에 들어가는 장면 순서대로."""
+    scripts = scripts_of(run_dir)
+    if not scripts:
+        return []
+    meta_path = run_dir / "scenes" / "_image_meta.json"
+    meta = read_json(meta_path) if meta_path.exists() else {}
+    credits = {c["scene"]: c for c in credits_of(run_dir)}
+    items = []
+    for sc in usable_scenes(scripts[-1]):
+        name = f"s{sc['no']:02d}"
+        m = meta.get(name)
+        if not m:
+            continue
+        path = run_dir / "scenes" / f"{name}.{m['kind']}"
+        if not path.exists():
+            continue
+        items.append({"no": sc["no"], "name": name, "kind": m["kind"], "path": path, "used": m.get("used"),
+                      "fallback": bool(m.get("fallback")), "screen_text": sc.get("screen_text", ""),
+                      "narration": sc["narration"], "credit": (credits.get(name) or {}).get("credit")})
+    return items
+
+
+def apply_image_review(run_dir: Path, redo_nos: list[int]) -> None:
+    """이미지 확인 결과를 기록하고 run.py 를 이어서 실행한다.
+    redo_nos 가 비어 있으면 승인(영상 만들기로 진행), 있으면 그 장면만 다르게 다시 만든다."""
+    if redo_nos:
+        from steps.s5_image import request_redo
+        request_redo(run_dir, redo_nos)
+        approvals.record(run_dir, 3, "rejected", "image", "", redo_nos)
+    else:
+        approvals.record(run_dir, 3, "approved")
+    start_run(run_dir)
+
+
 def apply_approval(run_dir: Path, stage: int, result: str, return_to=None, comment="", scenes=None) -> None:
-    """기록하고 run.py 를 이어서 실행한다."""
+    """기록하고 run.py 를 이어서 실행한다. 승인 ②를 '그림 문제'로 반려하면 고른 장면(없으면 전체)을 다르게 다시 만든다."""
+    if stage == 2 and result == "rejected" and return_to == "image":
+        from steps.s5_image import request_redo
+        nos = scenes or [i["no"] for i in image_check_items(run_dir)]
+        request_redo(run_dir, nos)
     approvals.record(run_dir, stage, result, return_to, comment, scenes)
     start_run(run_dir)

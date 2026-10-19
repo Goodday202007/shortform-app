@@ -9,7 +9,7 @@ FONTS = ROOT / "assets" / "fonts"
 
 # 단계 순서 (run.py와 status.json이 이 이름을 쓴다)
 STEPS = ["topic", "research", "script", "approval1",
-         "voice", "image", "motion", "compose", "approval2"]
+         "voice", "image", "approval_images", "motion", "compose", "approval2"]
 
 
 def load_env() -> None:

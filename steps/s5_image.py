@@ -88,10 +88,13 @@ def make_text_card(text: str, dest: Path) -> None:
 
 
 # ---------- AI 그림 ----------
-def make_ai_image(visual: str, dest: Path, steps: int | None = None) -> None:
+def make_ai_image(visual: str, dest: Path, steps: int | None = None, variant: int = 0) -> None:
+    """variant 0 은 처음 그림, 1 이상은 '같은 설명으로 다른 그림'(장면 다시 만들기).
+    변형 번호는 저장본 키만 바꾼다 → 저장본을 쓰지 않고 새로 요청하면 서버가 무작위로 그려 다른 그림이 나온다
+    (Cloudflare 는 seed 를 받지 않는다. 같은 설명으로 두 번 요청해 구도가 다른 것을 실제로 확인함)."""
     steps = steps or AI_STEPS
     prompt = STYLE_PREFIX + visual + PROMPT_SUFFIX
-    key = hashlib.sha1(f"{PROMPT_VER}|{steps}|{prompt}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"{PROMPT_VER}|{steps}|{variant}|{prompt}".encode()).hexdigest()[:16]
     cached = CACHE / "images" / f"{key}.png"
     if cached.exists():
         print("  (공용 저장본 사용 — Cloudflare 호출 안 함)")
@@ -221,10 +224,12 @@ def stock_queries(scene: dict) -> list[str]:
     return [q] + ([" ".join(words[:2])] if len(words) > 2 else [])
 
 
-def make_stock(scene: dict, need_sec: float | None, dest: Path) -> dict:
+def make_stock(scene: dict, need_sec: float | None, dest: Path, exclude: set | None = None) -> dict:
+    """exclude: 이미 보고 마음에 안 들어 한 영상 id (장면 다시 만들기에서 다른 영상을 고르게 한다)."""
     chosen = None
     for q in stock_queries(scene):
-        ranked = rank_stock(pixabay_search(q).get("hits", []), need_sec, q)
+        ranked = [c for c in rank_stock(pixabay_search(q).get("hits", []), need_sec, q)
+                  if c["id"] not in (exclude or set())]
         if not ranked:
             continue
         # Gemini를 못 쓰면(mode == "error") 태그만으로 추측하지 않는다. 태그로는 '사람이 달리는지 개가 달리는지'
@@ -242,7 +247,32 @@ def make_stock(scene: dict, need_sec: float | None, dest: Path) -> dict:
     else:
         download(chosen["url"], cached)
     shutil.copy(cached, dest)
-    return {"credit": f"Video by {chosen['user']} from Pixabay", "page_url": chosen["page_url"]}
+    return {"credit": f"Video by {chosen['user']} from Pixabay", "page_url": chosen["page_url"], "id": chosen["id"]}
+
+
+# ---------- 장면 다시 만들기 ----------
+def request_redo(run_dir: Path, scene_nos: list[int]) -> list[str]:
+    """고른 장면만 다음 ⑤ 실행에서 '다르게' 다시 만들도록 표시한다 (이미지 확인·승인 ②의 반려에서 부른다).
+    - AI 그림: 변형 번호를 올려 같은 설명으로 다른 그림을 그린다 (Cloudflare 한도를 쓴다).
+    - 스톡: 지금 쓰던 영상 id 를 제외 목록에 넣어 다음 후보를 고른다.
+    장면마다 scenes/_variants.json 에 {"variant": 횟수, "exclude": [영상 id…]} 로 기록한다."""
+    sdir = Path(run_dir) / "scenes"
+    meta_path, var_path = sdir / "_image_meta.json", sdir / "_variants.json"
+    meta = read_json(meta_path) if meta_path.exists() else {}
+    variants = read_json(var_path) if var_path.exists() else {}
+    names = []
+    for no in scene_nos:
+        name = f"s{no:02d}"
+        if name not in meta:
+            raise ValueError(f"장면 {no}은 아직 이미지가 만들어지지 않았습니다")
+        v = variants.setdefault(name, {"variant": 0, "exclude": []})
+        v["variant"] += 1
+        sid = meta[name].get("stock_id")
+        if sid and sid not in v["exclude"]:
+            v["exclude"].append(sid)
+        names.append(name)
+    write_json(var_path, variants)
+    return names
 
 
 # ---------- 단계 실행 ----------
@@ -254,16 +284,18 @@ def run(run_dir: Path) -> None:
 
     sdir = run_dir / "scenes"
     sdir.mkdir(exist_ok=True)
-    meta_path, credits_path = sdir / "_image_meta.json", sdir / "credits.json"
+    meta_path, credits_path, var_path = sdir / "_image_meta.json", sdir / "credits.json", sdir / "_variants.json"
     meta = read_json(meta_path) if meta_path.exists() else {}
     credits = read_json(credits_path) if credits_path.exists() else {}
+    variants = read_json(var_path) if var_path.exists() else {}
 
     for sc in scenes:
         no, name = sc["no"], f"s{sc['no']:02d}"
         want = sc["type"]
         text = sc.get("screen_text") or sc["narration"]
+        var = variants.get(name, {"variant": 0, "exclude": []})
         digest = hashlib.sha1(f"{want}|{sc['visual']}|{sc.get('stock_query', '')}|{text}|"
-                              f"{PROMPT_VER}|{AI_STEPS}".encode()).hexdigest()
+                              f"{PROMPT_VER}|{AI_STEPS}|{var['variant']}".encode()).hexdigest()
         ent = meta.get(name, {})
         png, mp4 = sdir / f"{name}.png", sdir / f"{name}.mp4"
         existing = png if ent.get("kind") == "png" else mp4
@@ -271,18 +303,20 @@ def run(run_dir: Path) -> None:
             print(f"{name}: 기존 {ent['kind']} 재사용")
             continue
 
-        print(f"{name}: {want} 만드는 중")
-        kind, used, fallback = None, want, False
+        print(f"{name}: {want} 만드는 중" + (f" (다시 만들기 {var['variant']}번째)" if var["variant"] else ""))
+        kind, used, fallback, stock_id = None, want, False, None
         order = {"ai_image": ["ai_image", "text_card"],
                  "stock": ["stock", "ai_image", "text_card"],
                  "text_card": ["text_card"]}[want]
         for i, how in enumerate(order):
             try:
                 if how == "stock":
-                    credits[name] = make_stock(sc, need.get(no), mp4)
+                    got = make_stock(sc, need.get(no), mp4, set(var["exclude"]))
+                    stock_id = got.pop("id")
+                    credits[name] = got
                     kind = "mp4"
                 elif how == "ai_image":
-                    make_ai_image(sc["visual"], png)
+                    make_ai_image(sc["visual"], png, variant=var["variant"])
                     kind = "png"
                 else:
                     make_text_card(text, png)
@@ -301,7 +335,7 @@ def run(run_dir: Path) -> None:
             if want == "stock" or ent.get("kind") == "mp4":
                 mp4.unlink(missing_ok=True)
             credits.pop(name, None)
-        meta[name] = {"digest": digest, "kind": kind, "used": used, "fallback": fallback}
+        meta[name] = {"digest": digest, "kind": kind, "used": used, "fallback": fallback, "stock_id": stock_id}
         write_json(meta_path, meta)
         write_json(credits_path, credits)
         print(f"  → {name}.{kind} ({used}{', 대체' if fallback else ''})")

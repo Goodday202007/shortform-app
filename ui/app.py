@@ -122,7 +122,8 @@ def screen_ready(run_dir: Path, resume: bool = False) -> None:
     else:
         label = st.radio("영상 길이", list(logic.PRESETS), index=0)
         scenes, seconds = logic.PRESETS[label]
-        st.caption("처음에는 개발용으로 시험하세요. 최종용은 Gemini·Cloudflare 무료 한도를 더 씁니다.")
+        st.caption("길이가 길수록 대본이 상세해집니다(한국어 음성은 1초에 약 6.5자). "
+                   "장면이 많을수록 Gemini·Cloudflare·Pixabay 무료 한도를 더 씁니다.")
     c1, c2 = st.columns([1, 3])
     if c1.button("▶ 시작" if not resume else "▶ 이어서 실행", type="primary"):
         logic.start_run(run_dir, scenes, seconds)
@@ -190,6 +191,9 @@ def screen_approval1(run_dir: Path) -> None:
                 st.markdown(f"[{s['url'][:60]}…]({s['url']})" if len(s["url"]) > 60 else f"[{s['url']}]({s['url']})")
                 if s.get("note"):
                     st.caption("⚠️ " + s["note"])
+                if s.get("detail"):
+                    with st.expander("원문 자료 보기 (대본이 참고한 내용)"):
+                        st.write(s["detail"])
     with col_scr:
         st.subheader(f"대본 — {script['title']}")
         used = logic.usable_scenes(script)
@@ -225,6 +229,52 @@ def screen_approval1(run_dir: Path) -> None:
             st.rerun()
 
 
+def screen_approval_images(run_dir: Path) -> None:
+    st.header("이미지 확인")
+    render_stepper(run_dir)
+    st.subheader(f"주제: {logic.topic_of(run_dir)}")
+    st.write("장면에 쓸 그림과 영상이 만들어졌습니다. **마음에 드는지 확인한 뒤** 영상으로 만드세요. "
+             "마음에 안 드는 장면은 체크해서 그 장면만 다시 만들 수 있습니다.")
+    items = logic.image_check_items(run_dir)
+    if not items:
+        st.error("확인할 이미지가 없습니다. 이전 단계에서 문제가 있었는지 진행 기록을 확인하세요.")
+        log_expander(run_dir)
+        return
+    kinds = {"ai_image": "🎨 AI 그림", "stock": "🎞️ 스톡 영상", "text_card": "🔤 글자 카드"}
+    picked = []
+    per_row = 3
+    for start in range(0, len(items), per_row):
+        cols = st.columns(per_row)
+        for col, it in zip(cols, items[start:start + per_row]):
+            with col, st.container(border=True):
+                tag = kinds.get(it["used"], it["used"]) + (" (대체됨)" if it["fallback"] else "")
+                st.markdown(f"**장면 {it['no']}** · {tag}")
+                if it["kind"] == "mp4":
+                    st.video(str(it["path"]), muted=True, loop=True, autoplay=False)
+                else:
+                    st.image(str(it["path"]))
+                st.caption(f"화면 글자: {it['screen_text']}")
+                st.write(it["narration"])
+                if it["credit"]:
+                    st.caption(it["credit"])
+                if it["fallback"]:
+                    st.caption("⚠️ 원래 계획한 방법이 실패해 대신 만든 것입니다.")
+                if st.checkbox("이 장면 다시 만들기", key=f"redo{it['no']}"):
+                    picked.append(it["no"])
+    st.divider()
+    a, b = st.columns(2)
+    with a:
+        if st.button("✅ 이대로 영상 만들기", type="primary"):
+            logic.apply_image_review(run_dir, [])
+            st.rerun()
+    with b:
+        label = f"🔁 체크한 {len(picked)}개 장면 다시 만들기" if picked else "🔁 체크한 장면 다시 만들기"
+        if st.button(label, disabled=not picked):
+            logic.apply_image_review(run_dir, picked)
+            st.rerun()
+        st.caption("AI 그림은 같은 설명으로 다른 그림을 그리고(Cloudflare 한도 사용), 스톡은 다른 영상을 고릅니다.")
+
+
 def screen_approval2(run_dir: Path) -> None:
     st.header("승인 ② 완성 영상 확인")
     render_stepper(run_dir)
@@ -249,8 +299,10 @@ def screen_approval2(run_dir: Path) -> None:
         script = logic.scripts_of(run_dir)[-1]
         nums = [s["no"] for s in logic.usable_scenes(script)]
         scenes = st.multiselect("문제가 있는 장면 (선택)", nums,
-                                help="지금은 기록만 됩니다. 장면만 골라 다시 만드는 기능은 아직 없어서 선택한 단계 전체가 다시 실행됩니다.")
-        st.caption("※ 같은 입력이면 저장된 결과를 재사용하므로, 그림·음성·움직임을 반려해도 결과가 같을 수 있습니다 (개선 예정).")
+                                help="'그림이 이상함'을 고르면 선택한 장면(고르지 않으면 전체)의 그림·스톡을 다르게 다시 만듭니다. "
+                                     "다른 단계를 고르면 장면 선택은 기록만 되고 그 단계 전체가 다시 실행됩니다.")
+        st.caption("※ '그림이 이상함'은 다른 그림·영상으로 바뀝니다(Cloudflare 한도를 씁니다). "
+                   "음성·움직임·합성은 입력이 같으면 저장된 결과를 재사용하므로 결과가 같을 수 있습니다 (개선 예정).")
         comment = st.text_area("의견 (필수)", key="rej2")
         if st.button("↩️ 반려하고 다시 만들기", disabled=not comment.strip()):
             logic.apply_approval(run_dir, 2, "rejected", ret, comment, scenes or None)
@@ -288,6 +340,7 @@ else:
         "interrupted": lambda d: screen_ready(d, resume=True),
         "error": screen_error,
         "approval1": screen_approval1,
+        "approval_images": screen_approval_images,
         "approval2": screen_approval2,
         "done": screen_done,
     }[stage](run_dir)

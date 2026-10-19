@@ -18,7 +18,9 @@ PIXABAY_CACHE_SEC = 24 * 3600   # Pixabay 규칙: 검색 결과 24시간 저장
 
 
 def cloudflare_image(prompt: str, steps: int = 4) -> bytes:
-    """FLUX.1 schnell로 그림 1장. 실패하면 RuntimeError (그림 한도 소진 포함)."""
+    """FLUX.1 schnell로 그림 1장. 실패하면 RuntimeError (그림 한도 소진 포함).
+    주의: 이 모델은 seed 를 받지 않는다(HTTP 400 'additional properties /seed not allowed', 실제 호출로 확인).
+    seed 없이도 같은 설명을 다시 요청하면 서버가 무작위로 그려 매번 다른 그림이 나온다."""
     acc, token = get_key("CLOUDFLARE_ACCOUNT_ID"), get_key("CLOUDFLARE_API_TOKEN")
     if not acc or not token:
         raise RuntimeError("Cloudflare 키가 .env에 없음")
@@ -30,6 +32,8 @@ def cloudflare_image(prompt: str, steps: int = 4) -> bytes:
             json={"prompt": prompt, "steps": steps}, timeout=120)
         if r.status_code in (401, 403):   # 키 문제는 다시 해도 같다
             raise NoRetry(f"Cloudflare HTTP {r.status_code}: 인증 실패")
+        if r.status_code == 400:          # 입력 형식 오류도 다시 해도 같다
+            raise NoRetry(f"Cloudflare HTTP 400: {r.text[:160]}")
         if r.status_code != 200:
             raise RuntimeError(f"Cloudflare HTTP {r.status_code}: {r.text[:200]}")
         body = r.json()
