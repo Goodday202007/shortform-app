@@ -5,7 +5,9 @@
 
 1) 장면 클립마다 1080x1920으로 맞추고 timings.json 길이(프레임 단위)에 맞춰 자르거나 반복한다.
    세로 영상은 중앙 크롭, 가로 영상은 정사각형 + 흐린 배경.
-2) 클립을 이어 붙인다.
+2) 장면 사이는 0.3초 크로스페이드로 잇는다. 장면마다 앞(head)·가운데(body)·뒤(tail) 조각을 만들고
+   이웃한 tail+head 만 짧게 섞어 이어 붙인다 (전체 프레임 수가 그대로라 음성·자막 싱크 유지,
+   모든 클립을 한꺼번에 디코딩하는 xfade 체인보다 메모리가 훨씬 적다).
 3) voice.mp3를 얹고, 대본의 화면 글자(위)와 subtitle.srt 자막(아래)을 Pretendard로 입혀 한 번에 인코딩한다.
 ffmpeg만 쓴다 (RAM 8GB PC에서 MoviePy보다 가볍다).
 """
@@ -65,21 +67,86 @@ LANDSCAPE_FILTER = (
 )
 
 
-def normalize_clip(run_dir: Path, name: str, frames: int) -> None:
-    """scenes/<name>.mp4 → compose/<name>.mp4 (1080x1920, 정확히 frames 프레임).
-    세로 영상은 꽉 차게 중앙 크롭, 가로·정사각 영상은 정사각형 + 흐린 배경. 짧으면 반복, 길면 앞에서부터 자른다."""
+VERTICAL_FILTER = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                   f"setsar=1,fps={FPS},format=yuv420p[v]")
+# 중간 파일이라 ultrafast: 같은 crf 에서 용량만 커지고 화질은 그대로, 시간은 절반 이하(실측). 최종 인코딩이 다시 압축한다.
+INTERMEDIATE = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-an"]
+FADE_FRAMES = 9     # 장면 전환 크로스페이드 길이: 9프레임 = 0.3초
+
+
+def fit_filter(run_dir: Path, name: str) -> str:
+    """세로 영상은 꽉 차게 중앙 크롭, 가로·정사각 영상은 정사각형 + 흐린 배경. 결과 스트림 이름은 [v]."""
     w, h = clip_size(run_dir / "scenes" / f"{name}.mp4")
-    if w / h > 0.9:
-        mode = ["-filter_complex", LANDSCAPE_FILTER, "-map", "[v]"]
-    else:
-        mode = ["-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-                       f"setsar=1,fps={FPS},format=yuv420p"]
+    return LANDSCAPE_FILTER if w / h > 0.9 else VERTICAL_FILTER
+
+
+def normalize_clip(run_dir: Path, name: str, frames: int) -> None:
+    """(하드컷용) scenes/<name>.mp4 → compose/<name>.mp4 (1080x1920, 정확히 frames 프레임).
+    짧으면 반복, 길면 앞에서부터 자른다."""
     subprocess.run(
-        ["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", f"scenes/{name}.mp4", *mode,
-         "-frames:v", str(frames), "-an",
-         # 중간 파일이라 ultrafast: 같은 crf 에서 용량만 커지고 화질은 그대로, 시간은 절반 이하(실측). 최종 인코딩이 다시 압축한다.
-         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", f"compose/{name}.mp4"],
+        ["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", f"scenes/{name}.mp4",
+         "-filter_complex", fit_filter(run_dir, name), "-map", "[v]",
+         "-frames:v", str(frames), *INTERMEDIATE, f"compose/{name}.mp4"],
         cwd=run_dir, check=True)
+
+
+def plan_pieces(f: int, first: bool, last: bool, k: int = FADE_FRAMES) -> list[tuple[str, int, int]]:
+    """한 장면(f프레임)에서 만들 조각 [(이름, 시작프레임, 끝프레임)].
+    - head: 앞 k프레임 (앞 장면과 섞이는 구간, 첫 장면은 없음)
+    - body: 섞이지 않는 가운데 (첫 장면은 0부터, 나머지는 k부터 f까지)
+    - tail: 장면 끝 뒤 k프레임 (다음 장면과 섞이는 구간, 마지막 장면은 없음)
+    전체 프레임 = Σ body + Σ 전환(k) = Σ f 라서 음성·자막 싱크가 어긋나지 않는다."""
+    pieces = []
+    if not first:
+        pieces.append(("head", 0, k))
+    pieces.append(("body", 0 if first else k, f))
+    if not last:
+        pieces.append(("tail", f, f + k))
+    return pieces
+
+
+def make_pieces(run_dir: Path, name: str, f: int, first: bool, last: bool) -> None:
+    """클립 하나를 한 번만 읽어 head/body/tail 조각을 동시에 만든다 (compose/<name>_<조각>.mp4)."""
+    pieces = plan_pieces(f, first, last)
+    m = len(pieces)
+    chain = fit_filter(run_dir, name) + (f";[v]split={m}" + "".join(f"[s{j}]" for j in range(m)) if m > 1 else ";[v]null[s0]")
+    outs = []
+    for j, (kind, a, b) in enumerate(pieces):
+        chain += f";[s{j}]trim=start_frame={a}:end_frame={b},setpts=PTS-STARTPTS[o{j}]"
+        outs += ["-map", f"[o{j}]", "-frames:v", str(b - a), *INTERMEDIATE, f"compose/{name}_{kind}.mp4"]
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", f"scenes/{name}.mp4",
+                    "-filter_complex", chain, *outs], cwd=run_dir, check=True)
+
+
+def make_transition(run_dir: Path, a: str, b: str, idx: int, k: int = FADE_FRAMES) -> str:
+    """앞 장면의 tail 과 뒷 장면의 head 를 k프레임 동안 크로스페이드한 조각 compose/x<idx>.mp4 를 만든다."""
+    out = f"x{idx:02d}.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", f"compose/{a}_tail.mp4", "-i", f"compose/{b}_head.mp4",
+         "-filter_complex", f"[0:v][1:v]xfade=transition=fade:duration={k / FPS:.4f}:offset=0,format=yuv420p[v]",
+         "-map", "[v]", "-frames:v", str(k), *INTERMEDIATE, f"compose/{out}"],
+        cwd=run_dir, check=True)
+    return out
+
+
+def build_clips(run_dir: Path, names: list[str], frames: list[int]) -> list[str]:
+    """장면 클립을 만들어 compose/ 안에서 이어 붙일 순서의 파일 이름 목록을 돌려준다.
+    장면이 2개 이상이고 모든 장면이 충분히 길면 크로스페이드, 아니면 하드컷."""
+    n = len(names)
+    if n >= 2 and min(frames) >= 3 * FADE_FRAMES:
+        for i, (name, f) in enumerate(zip(names, frames)):
+            print(f"{name}: 클립 정리 ({f}프레임 = {f / FPS:.2f}초, 전환 {FADE_FRAMES}프레임)")
+            make_pieces(run_dir, name, f, first=(i == 0), last=(i == n - 1))
+        order = []
+        for i in range(n):
+            order.append(f"{names[i]}_body.mp4")
+            if i < n - 1:
+                order.append(make_transition(run_dir, names[i], names[i + 1], i))
+        return order
+    for name, f in zip(names, frames):
+        print(f"{name}: 클립 정리 ({f}프레임 = {f / FPS:.2f}초, 하드컷)")
+        normalize_clip(run_dir, name, f)
+    return [f"{name}.mp4" for name in names]
 
 
 # ---------- 화면 글자(제목) ----------
@@ -151,16 +218,16 @@ def run(run_dir: Path) -> None:
     if not list(FONTS.glob("Pretendard-Bold.*")):
         print("경고: assets/fonts에 Pretendard가 없어 다른 글꼴로 대체됩니다")
 
-    (run_dir / "compose").mkdir(exist_ok=True)
-    lines = []
-    for tm, frames in zip(timings, frame_counts(timings)):
-        name = f"s{tm['no']:02d}"
+    cdir = run_dir / "compose"
+    cdir.mkdir(exist_ok=True)
+    for old in cdir.glob("*.mp4"):                  # 이전 합성의 조각이 섞이지 않게 비운다
+        old.unlink()
+    names = [f"s{tm['no']:02d}" for tm in timings]
+    for name in names:
         if not (run_dir / "scenes" / f"{name}.mp4").exists():
             raise FileNotFoundError(f"scenes/{name}.mp4 없음 (⑤ 이미지, ⑥ 영상화 단계가 먼저 필요)")
-        print(f"{name}: 클립 정리 ({frames}프레임 = {frames / FPS:.2f}초)")
-        normalize_clip(run_dir, name, frames)
-        lines.append(f"file '{name}.mp4'\n")
-    (run_dir / "compose" / "_list.txt").write_text("".join(lines), encoding="utf-8")
+    order = build_clips(run_dir, names, frame_counts(timings))
+    (cdir / "_list.txt").write_text("".join(f"file '{f}'\n" for f in order), encoding="utf-8")
 
     fonts = ff_path(FONTS.resolve(), run_dir.resolve())
     vf = f"subtitles=subtitle.srt:fontsdir={fonts}:force_style='{SUB_STYLE}'"

@@ -17,20 +17,25 @@ from pathlib import Path
 from common.fileio import read_json, write_json
 
 W, H, FPS = 1080, 1920, 30
-ZOOM = 0.15   # 장면 동안 15% 확대
-FILTER_VER = "v2"   # 필터를 바꾸면 올린다 → 이미 만든 클립을 다시 만든다
+ZOOM = 0.18   # 장면 동안 18% 확대(또는 축소)
+TAIL_FRAMES = 12    # 장면 길이 뒤에 더 만들어 두는 프레임: ⑦의 크로스페이드가 이 구간을 겹쳐 쓴다(움직임이 이어짐)
+FILTER_VER = "v3"   # 필터를 바꾸면 올린다 → 이미 만든 클립을 다시 만든다
+MOTIONS = ["zoom_in", "zoom_pan_right", "zoom_out", "zoom_pan_left"]
 
 
 def motion_for(no: int) -> str:
-    """장면 번호로 움직임을 번갈아 준다: 홀수=가운데 확대, 짝수=확대하며 오른쪽으로 이동."""
-    return "zoom_in" if no % 2 == 1 else "zoom_pan"
+    """장면 번호로 움직임을 돌아가며 준다: 확대 → 확대+오른쪽 이동 → 축소 → 확대+왼쪽 이동."""
+    return MOTIONS[(no - 1) % len(MOTIONS)]
 
 
 def build_filter(no: int, frames: int) -> str:
     # 그림을 먼저 크게 키운 뒤(세로 2048) 9:16으로 자르고 zoompan을 건다 → 떨림이 줄어든다
-    z = f"1+{ZOOM}*on/{frames}"
+    m = motion_for(no)
+    p = f"on/{frames}"                                  # 진행도 0→1
+    z = f"1+{ZOOM}-{ZOOM}*{p}" if m == "zoom_out" else f"1+{ZOOM}*{p}"
     y = "ih/2-(ih/zoom/2)"
-    x = "iw/2-(iw/zoom/2)" if motion_for(no) == "zoom_in" else f"(iw-iw/zoom)*on/{frames}"
+    x = {"zoom_pan_right": f"(iw-iw/zoom)*{p}",
+         "zoom_pan_left": f"(iw-iw/zoom)*(1-{p})"}.get(m, "iw/2-(iw/zoom/2)")
     # 1024px 그림을 1080x1920으로 키우므로 Lanczos로 키우고 약하게 선명화한다 (흐려 보이는 것 완화)
     return (f"scale=-2:2048:flags=lanczos,crop=1152:2048,"
             f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={FPS},"
@@ -39,7 +44,7 @@ def build_filter(no: int, frames: int) -> str:
 
 def make_clip(run_dir: Path, no: int, duration: float) -> None:
     name = f"s{no:02d}"
-    frames = math.ceil(duration * FPS)
+    frames = math.ceil(duration * FPS) + TAIL_FRAMES      # 뒤에 전환용 여분을 붙여 만든다(⑦이 필요한 만큼만 쓴다)
     # 작업 폴더(run_dir) 기준 상대 경로 → Windows 경로 이스케이프 문제 회피
     subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-i", f"scenes/{name}.png",

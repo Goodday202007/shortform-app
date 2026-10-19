@@ -71,17 +71,28 @@ def wrap_text(draw, text: str, font, max_w: int) -> list[str]:
     return out
 
 
+CARD_TOP, CARD_BOTTOM = (18, 36, 66), (52, 104, 160)    # 위쪽 짙은 남색 → 아래쪽 밝은 파랑 그라데이션
+CARD_ACCENT = (255, 208, 90)                             # 강조선 색
+
+
 def make_text_card(text: str, dest: Path) -> None:
-    img = Image.new("RGB", (1080, 1920), CARD_BG)
+    """글자 카드: 그라데이션 배경 + 강조선 + 그림자가 있는 큰 글자. 외부 서비스 없이 항상 만들어지는 최후의 대체 수단."""
+    from PIL import ImageOps
+    grad = Image.linear_gradient("L").resize((1080, 1920), Image.BILINEAR)
+    img = ImageOps.colorize(grad, black=CARD_TOP, white=CARD_BOTTOM).convert("RGB")
     draw = ImageDraw.Draw(img)
     fp = font_path()
     font = ImageFont.truetype(str(fp), 104) if fp else ImageFont.load_default(size=104)
     lines = wrap_text(draw, text, font, 900)
     line_h = 104 * 1.45
     y = (1920 - line_h * len(lines)) / 2
+    bar_y = y - 70                                      # 글자 덩어리 위의 강조선
+    draw.rounded_rectangle(((1080 - 150) / 2, bar_y, (1080 + 150) / 2, bar_y + 12), radius=6, fill=CARD_ACCENT)
     for ln in lines:
         w = draw.textlength(ln, font=font)
-        draw.text(((1080 - w) / 2, y), ln, font=font, fill=CARD_FG)
+        x = (1080 - w) / 2
+        draw.text((x + 4, y + 5), ln, font=font, fill=(8, 18, 36))        # 그림자
+        draw.text((x, y), ln, font=font, fill=CARD_FG)
         y += line_h
     dest.parent.mkdir(parents=True, exist_ok=True)
     img.save(dest)
@@ -188,20 +199,43 @@ def fetch_thumb(cand: dict) -> bytes:
     return r.content
 
 
+DARK_LUMA = 40   # 대표 이미지의 평균 밝기(0~255)가 이보다 낮으면 '매우 어두움'
+
+
+def mean_luma(jpeg: bytes) -> float | None:
+    """대표 이미지의 평균 밝기(0~255). 이미지로 읽을 수 없으면 None(= 어둡다고 단정하지 않음)."""
+    try:
+        from PIL import ImageStat
+        import io
+        return ImageStat.Stat(Image.open(io.BytesIO(jpeg)).convert("L").resize((64, 36))).mean[0]
+    except Exception:
+        return None
+
+
 def vision_choose(scene: dict, query: str, ranked: list[dict]) -> tuple[dict | None, str]:
     """후보의 대표 이미지를 Gemini가 보고 고른다. ('선택된 후보 또는 None', 'vision'|'none'|'error').
     같은 설명·후보 조합은 저장해 다시 묻지 않는다. 공개 스톡 썸네일만 보낸다."""
-    top = ranked[:VISION_K]
     desc = scene.get("visual") or query
     line = scene.get("narration") or scene.get("screen_text") or ""
-    key = hashlib.sha1(f"{VISION_VER}|{desc}|{query}|{line}|{','.join(str(c['id']) for c in top)}".encode()).hexdigest()[:16]
-    cache = CACHE / "vision" / f"{key}.json"
     try:
+        # 밝기 기준: 어두운 후보를 빼도 밝은 후보가 2개 이상 남으면 어두운 것은 Gemini에게 보여 주지 않는다.
+        pool = ranked[:VISION_K + 3]
+        thumbs = [fetch_thumb(c) for c in pool]
+        lumas = [mean_luma(t) for t in thumbs]
+        bright = [i for i, v in enumerate(lumas) if v is None or v >= DARK_LUMA]
+        keep = (bright if len(bright) >= 2 else list(range(len(pool))))[:VISION_K]
+        if len(keep) and any(lumas[i] is not None and lumas[i] < DARK_LUMA for i in range(min(VISION_K, len(pool)))):
+            dark = [pool[i]["id"] for i in range(len(pool)) if i not in keep and lumas[i] is not None and lumas[i] < DARK_LUMA]
+            if dark:
+                print(f"  너무 어두운 후보 제외: {dark}")
+        top, images = [pool[i] for i in keep], [thumbs[i] for i in keep]
+        key = hashlib.sha1(f"{VISION_VER}|{desc}|{query}|{line}|{','.join(str(c['id']) for c in top)}".encode()).hexdigest()[:16]
+        cache = CACHE / "vision" / f"{key}.json"
         if cache.exists():
             data = read_json(cache)
         else:
             data = gemini_json(VISION_PROMPT.format(desc=desc, query=query, line=line, n=len(top)), VISION_MODEL,
-                               images=[fetch_thumb(c) for c in top])
+                               images=images)
             best = data.get("best") if isinstance(data, dict) else None
             if not isinstance(best, int) or isinstance(best, bool) or not 0 <= best <= len(top):
                 raise ValueError(f"Gemini 답 형식 이상: {str(data)[:80]}")
