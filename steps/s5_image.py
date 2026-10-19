@@ -13,8 +13,8 @@
 """
 import argparse
 import hashlib
+import re
 import shutil
-import textwrap
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -23,10 +23,14 @@ from common.config import FONTS
 from common.fileio import latest_script, read_json, write_json
 from common.services import CACHE, cloudflare_image, download, pixabay_search
 
-PROMPT_VER = "v1"
-# ⑥에서 정사각 그림을 가운데 9:16으로 자르므로 주인공을 가운데에 두라고 요청한다
-PROMPT_SUFFIX = (", main subject centered in the middle of the frame, "
-                 "simple uncluttered background, no text, no letters")
+PROMPT_VER = "v2"
+# 모든 그림에 같은 사진풍 스타일을 준다 (스타일 지시가 없으면 아이콘·일러스트처럼 밋밋하게 나온다).
+STYLE_PREFIX = "Cinematic photograph, soft natural lighting, shallow depth of field, rich colors, high detail. "
+# ⑥에서 정사각 그림을 가운데 9:16으로 자르므로 주인공을 크게 가운데에 두라고 요청한다
+PROMPT_SUFFIX = (", main subject large and centered in the middle of the frame, "
+                 "simple uncluttered background, photorealistic, no text, no letters, no icons")
+AI_STEPS = 4         # Cloudflare 확산 단계 수 (최대 8, 높을수록 품질↑·느림). 시험 결과로 정한다.
+MIN_RELEVANCE = 0.5  # 스톡 검색어 단어 중 영상 태그와 맞아야 하는 비율
 CARD_BG, CARD_FG = (31, 58, 95), (255, 255, 255)   # 기획서 브랜드색 남색 / 흰색
 MAX_STOCK_MB = 25
 
@@ -80,53 +84,91 @@ def make_text_card(text: str, dest: Path) -> None:
 
 
 # ---------- AI 그림 ----------
-def make_ai_image(visual: str, dest: Path) -> None:
-    prompt = visual + PROMPT_SUFFIX
-    cached = CACHE / "images" / (hashlib.sha1(f"{PROMPT_VER}|{prompt}".encode()).hexdigest()[:16] + ".png")
+def make_ai_image(visual: str, dest: Path, steps: int | None = None) -> None:
+    steps = steps or AI_STEPS
+    prompt = STYLE_PREFIX + visual + PROMPT_SUFFIX
+    key = hashlib.sha1(f"{PROMPT_VER}|{steps}|{prompt}".encode()).hexdigest()[:16]
+    cached = CACHE / "images" / f"{key}.png"
     if cached.exists():
         print("  (공용 저장본 사용 — Cloudflare 호출 안 함)")
     else:
         import io
-        raw = cloudflare_image(prompt)
+        raw = cloudflare_image(prompt, steps=steps)
         cached.parent.mkdir(parents=True, exist_ok=True)
         Image.open(io.BytesIO(raw)).convert("RGB").save(cached)
     shutil.copy(cached, dest)
 
 
 # ---------- 스톡 영상 ----------
-def pick_stock(hits: list[dict], need_sec: float | None) -> dict | None:
-    """세로 영상 우선 → 필요한 길이 이상 → 파일이 작은 것. 크기 제한 안의 후보만."""
+def _norm(word: str) -> str:
+    w = word.lower()
+    return w[:-1] if len(w) > 3 and w.endswith("s") else w      # 복수형 단순 처리
+
+
+def relevance(query: str, tags: str) -> tuple[int, int]:
+    """검색어 단어 중 영상 태그와 맞는 개수와 전체 단어 수. 태그와 앞부분이 같으면 맞는 것으로 본다
+    (예: 검색어 smartphone ↔ 태그 smart)."""
+    qs = [_norm(w) for w in re.findall(r"[A-Za-z]+", query) if len(w) > 2]
+    tokens = {_norm(t) for tag in tags.split(",") for t in re.findall(r"[A-Za-z]+", tag)}
+
+    def hit(q: str) -> bool:
+        return any(q == t or (len(t) >= 4 and q.startswith(t)) or (len(q) >= 4 and t.startswith(q))
+                   for t in tokens)
+    return sum(hit(q) for q in qs), len(qs)
+
+
+def pick_stock(hits: list[dict], need_sec: float | None, query: str = "") -> dict | None:
+    """관련도(검색어와 태그가 맞는 정도)가 기준 이상인 후보만 두고, 그중 관련도 높은 것 →
+    세로 영상 → 필요한 길이 이상 → 파일이 작은 것 순으로 고른다. 관련 있는 후보가 없으면 None
+    (이상한 영상을 억지로 쓰지 않고, 호출한 쪽에서 AI 그림으로 대체한다)."""
     def rend(h):
         v = h["videos"]
         for k in ("medium", "small", "tiny"):
             if v.get(k, {}).get("url") and v[k]["size"] <= MAX_STOCK_MB * 1e6:
                 return v[k]
         return None
-    cands = [(h, rend(h)) for h in hits]
-    cands = [(h, r) for h, r in cands if r]
+    cands = []
+    for h in hits:
+        r = rend(h)
+        if not r:
+            continue
+        matched, total = relevance(query, h.get("tags", "")) if query else (1, 1)
+        if total and matched / total >= MIN_RELEVANCE and matched >= 1:
+            cands.append((h, r, matched))
     if not cands:
         return None
+
     def key(c):
-        h, r = c
+        h, r, matched = c
         vertical = r["height"] > r["width"]
         long_enough = need_sec is None or h["duration"] >= need_sec
-        return (not vertical, not long_enough, r["size"])
-    h, r = min(cands, key=key)
+        return (-matched, not vertical, not long_enough, r["size"])
+    h, r, matched = min(cands, key=key)
     return {"id": h["id"], "url": r["url"], "size": r["size"], "w": r["width"], "h": r["height"],
-            "duration": h["duration"], "user": h["user"], "page_url": h["pageURL"]}
+            "duration": h["duration"], "user": h["user"], "page_url": h["pageURL"],
+            "tags": h.get("tags", ""), "matched": matched}
 
 
-def make_stock(visual: str, need_sec: float | None, dest: Path) -> dict:
-    words = visual.split()
-    for q in (" ".join(words[:6]), " ".join(words[:3])):   # 긴 설명은 결과가 적어 짧게도 시도
-        hits = pixabay_search(q).get("hits", [])
-        chosen = pick_stock(hits, need_sec)
+def stock_queries(scene: dict) -> list[str]:
+    """③이 만든 영어 키워드(stock_query)를 쓴다. 옛 대본에는 없으니 visual 의 앞부분으로 대신한다.
+    결과가 없으면 앞 두 단어로 한 번 더 시도한다."""
+    q = " ".join((scene.get("stock_query") or "").split())
+    if not q:
+        q = " ".join(re.findall(r"[A-Za-z]+", scene.get("visual", ""))[:3])
+    words = q.split()
+    return [q] + ([" ".join(words[:2])] if len(words) > 2 else [])
+
+
+def make_stock(scene: dict, need_sec: float | None, dest: Path) -> dict:
+    chosen = None
+    for q in stock_queries(scene):
+        chosen = pick_stock(pixabay_search(q).get("hits", []), need_sec, q)
         if chosen:
             break
-    else:
-        raise RuntimeError(f"스톡 검색 결과 없음: {visual!r}")
-    print(f"  스톡 선택: id={chosen['id']} {chosen['w']}x{chosen['h']} "
-          f"{chosen['duration']}초 {chosen['size'] / 1e6:.1f}MB by {chosen['user']}")
+    if not chosen:
+        raise RuntimeError(f"관련 있는 스톡 영상이 없음: {stock_queries(scene)}")
+    print(f"  스톡 선택: id={chosen['id']} {chosen['w']}x{chosen['h']} {chosen['duration']}초 "
+          f"{chosen['size'] / 1e6:.1f}MB (검색어와 맞는 태그 {chosen['matched']}개) tags=[{chosen['tags'][:60]}]")
     cached = CACHE / "videos" / f"{chosen['id']}.mp4"
     if cached.exists():
         print("  (공용 저장본 사용 — 다운로드 안 함)")
@@ -153,7 +195,8 @@ def run(run_dir: Path) -> None:
         no, name = sc["no"], f"s{sc['no']:02d}"
         want = sc["type"]
         text = sc.get("screen_text") or sc["narration"]
-        digest = hashlib.sha1(f"{want}|{sc['visual']}|{text}|{PROMPT_VER}".encode()).hexdigest()
+        digest = hashlib.sha1(f"{want}|{sc['visual']}|{sc.get('stock_query', '')}|{text}|"
+                              f"{PROMPT_VER}|{AI_STEPS}".encode()).hexdigest()
         ent = meta.get(name, {})
         png, mp4 = sdir / f"{name}.png", sdir / f"{name}.mp4"
         existing = png if ent.get("kind") == "png" else mp4
@@ -169,7 +212,7 @@ def run(run_dir: Path) -> None:
         for i, how in enumerate(order):
             try:
                 if how == "stock":
-                    credits[name] = make_stock(sc["visual"], need.get(no), mp4)
+                    credits[name] = make_stock(sc, need.get(no), mp4)
                     kind = "mp4"
                 elif how == "ai_image":
                     make_ai_image(sc["visual"], png)

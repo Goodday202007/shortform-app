@@ -18,6 +18,7 @@ from common.fileio import read_json, write_json
 
 W, H, FPS = 1080, 1920, 30
 ZOOM = 0.15   # 장면 동안 15% 확대
+FILTER_VER = "v2"   # 필터를 바꾸면 올린다 → 이미 만든 클립을 다시 만든다
 
 
 def motion_for(no: int) -> str:
@@ -30,9 +31,10 @@ def build_filter(no: int, frames: int) -> str:
     z = f"1+{ZOOM}*on/{frames}"
     y = "ih/2-(ih/zoom/2)"
     x = "iw/2-(iw/zoom/2)" if motion_for(no) == "zoom_in" else f"(iw-iw/zoom)*on/{frames}"
-    return (f"scale=-2:2048,crop=1152:2048,"
+    # 1024px 그림을 1080x1920으로 키우므로 Lanczos로 키우고 약하게 선명화한다 (흐려 보이는 것 완화)
+    return (f"scale=-2:2048:flags=lanczos,crop=1152:2048,"
             f"zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={FPS},"
-            f"format=yuv420p")
+            f"unsharp=5:5:0.6,format=yuv420p")
 
 
 def make_clip(run_dir: Path, no: int, duration: float) -> None:
@@ -65,7 +67,7 @@ def run(run_dir: Path) -> None:
                 continue
             raise FileNotFoundError(f"{png} 없음 (⑤ 이미지 단계가 먼저 필요)")
         digest = hashlib.sha1(png.read_bytes() +
-                              f"|{tm['duration']}|{motion_for(no)}".encode()).hexdigest()
+                              f"|{tm['duration']}|{motion_for(no)}|{FILTER_VER}".encode()).hexdigest()
         if mp4.exists() and meta.get(name) == digest:
             print(f"{name}: 기존 클립 재사용")
             continue

@@ -1,11 +1,12 @@
 """⑦ 영상 합성 단계.
 입력: script_v*.json, timings.json, scenes/sNN.mp4, voice.mp3, subtitle.srt
-출력: final.mp4 (1080x1920, 30fps, 음성+자막)
+출력: final.mp4 (1080x1920, 30fps, 음성+자막+화면 글자), titles.ass
 실행: python -m steps.s7_compose --run outputs/<실행폴더>
 
-1) 장면 클립마다 1080x1920으로 크롭하고 timings.json 길이(프레임 단위)에 맞춰 자르거나 반복한다.
+1) 장면 클립마다 1080x1920으로 맞추고 timings.json 길이(프레임 단위)에 맞춰 자르거나 반복한다.
+   세로 영상은 중앙 크롭, 가로 영상은 정사각형 + 흐린 배경.
 2) 클립을 이어 붙인다.
-3) voice.mp3를 얹고 subtitle.srt를 Pretendard로 입혀 한 번에 인코딩한다.
+3) voice.mp3를 얹고, 대본의 화면 글자(위)와 subtitle.srt 자막(아래)을 Pretendard로 입혀 한 번에 인코딩한다.
 ffmpeg만 쓴다 (RAM 8GB PC에서 MoviePy보다 가볍다).
 """
 import argparse
@@ -14,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 from common.config import FONTS
-from common.fileio import read_json
+from common.fileio import latest_script, read_json
 
 W, H, FPS = 1080, 1920, 30
 # 주의: SRT 자막의 force_style 숫자는 픽셀이 아니라 libass 기본 좌표계(384x288) 기준이다.
@@ -44,16 +45,91 @@ def frame_counts(timings: list[dict]) -> list[int]:
     return out
 
 
+def clip_size(path: Path) -> tuple[int, int]:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True).stdout.strip()
+    w, h = out.split(",")
+    return int(w), int(h)
+
+
+# 가로·정사각 영상(스톡)을 9:16에 넣는 방식: 가운데 정사각형만 크게 보여 주고 위아래는 같은 영상을 흐리게 채운다.
+# 가운데를 세로로 자르기만 하면 가로 영상은 폭의 68%가 사라져 주인공이 잘린다.
+LANDSCAPE_FILTER = (
+    f"[0:v]split=2[a][b];"
+    f"[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=40:6[bg];"
+    f"[b]crop='min(iw,ih)':'min(iw,ih)',scale={W}:{W}:flags=lanczos[fg];"
+    f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,fps={FPS},format=yuv420p[v]"
+)
+
+
 def normalize_clip(run_dir: Path, name: str, frames: int) -> None:
-    """scenes/<name>.mp4 → compose/<name>.mp4 (9:16 중앙 크롭, 정확히 frames 프레임).
-    원본이 짧으면 반복해서 채우고, 길면 앞에서부터 자른다."""
+    """scenes/<name>.mp4 → compose/<name>.mp4 (1080x1920, 정확히 frames 프레임).
+    세로 영상은 꽉 차게 중앙 크롭, 가로·정사각 영상은 정사각형 + 흐린 배경. 짧으면 반복, 길면 앞에서부터 자른다."""
+    w, h = clip_size(run_dir / "scenes" / f"{name}.mp4")
+    if w / h > 0.9:
+        mode = ["-filter_complex", LANDSCAPE_FILTER, "-map", "[v]"]
+    else:
+        mode = ["-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                       f"setsar=1,fps={FPS},format=yuv420p"]
     subprocess.run(
-        ["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", f"scenes/{name}.mp4",
-         "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-                f"setsar=1,fps={FPS},format=yuv420p",
+        ["ffmpeg", "-v", "error", "-y", "-stream_loop", "-1", "-i", f"scenes/{name}.mp4", *mode,
          "-frames:v", str(frames), "-an",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", f"compose/{name}.mp4"],
         cwd=run_dir, check=True)
+
+
+# ---------- 화면 글자(제목) ----------
+# 대본의 screen_text 를 장면 위쪽에 얹는다. SRT 와 달리 ASS 는 PlayRes 를 우리가 정하므로 숫자가 픽셀이다.
+ASS_HEAD = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: {W}
+PlayResY: {H}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Title,Pretendard,92,&H00FFFFFF,&H00FFFFFF,&H99000000,&H00000000,-1,0,0,0,100,100,0,0,3,24,0,8,80,80,190,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def ass_time(sec: float) -> str:
+    cs = round(sec * 100)
+    h, cs = divmod(cs, 360000)
+    m, cs = divmod(cs, 6000)
+    s, cs = divmod(cs, 100)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def build_titles_ass(items: list[tuple[str, float, float]]) -> str:
+    """items: (글자, 시작초, 끝초). 서서히 나타났다 사라진다."""
+    lines = []
+    for text, a, b in items:
+        clean = " ".join(text.replace("{", "").replace("}", "").replace("\\", "").split())
+        if clean:
+            lines.append(f"Dialogue: 0,{ass_time(a)},{ass_time(b)},Title,,0,0,0,,{{\\fad(250,200)}}{clean}")
+    return ASS_HEAD + "\n".join(lines) + "\n"
+
+
+def title_items(run_dir: Path, script: dict, timings: list[dict]) -> list[tuple[str, float, float]]:
+    """글자 카드 장면은 카드에 이미 같은 글자가 크게 있으므로 제목을 또 얹지 않는다."""
+    by_no = {s["no"]: s for s in script["scenes"]}
+    meta_path = run_dir / "scenes" / "_image_meta.json"
+    used = {k: v.get("used") for k, v in read_json(meta_path).items()} if meta_path.exists() else {}
+    items = []
+    for tm in timings:
+        sc = by_no.get(tm["no"])
+        if not sc or not sc.get("screen_text"):
+            continue
+        kind = used.get(f"s{tm['no']:02d}") or sc["type"]
+        if kind == "text_card":
+            continue
+        items.append((sc["screen_text"], tm["start"] + 0.1, tm["start"] + tm["duration"] - 0.1))
+    return items
 
 
 def probe(path: Path, entry: str) -> float:
@@ -83,9 +159,13 @@ def run(run_dir: Path) -> None:
         lines.append(f"file '{name}.mp4'\n")
     (run_dir / "compose" / "_list.txt").write_text("".join(lines), encoding="utf-8")
 
-    vf = (f"subtitles=subtitle.srt:fontsdir={ff_path(FONTS.resolve(), run_dir.resolve())}"
-          f":force_style='{SUB_STYLE}'")
-    print("합성: 이어 붙이기 + 음성 + 자막")
+    fonts = ff_path(FONTS.resolve(), run_dir.resolve())
+    vf = f"subtitles=subtitle.srt:fontsdir={fonts}:force_style='{SUB_STYLE}'"
+    items = title_items(run_dir, read_json(latest_script(run_dir)), timings)
+    if items:                                   # 제목(위) → 자막(아래) 순서로 입힌다
+        (run_dir / "titles.ass").write_text(build_titles_ass(items), encoding="utf-8")
+        vf = f"ass=titles.ass:fontsdir={fonts}," + vf
+    print(f"합성: 이어 붙이기 + 음성 + 자막 + 화면 글자 {len(items)}개")
     subprocess.run(
         ["ffmpeg", "-v", "error", "-y",
          "-f", "concat", "-safe", "0", "-i", "compose/_list.txt", "-i", "voice.mp3",

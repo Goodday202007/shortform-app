@@ -14,6 +14,7 @@
 """
 import argparse
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -23,7 +24,8 @@ from common.services import gemini_json
 MODEL = "gemini-3.5-flash-lite"
 TYPES = {"ai_image", "stock", "text_card"}
 CHARS_PER_SEC = 6.5      # edge-tts 실측: 한국어 28자 ≈ 4.3초
-REQUIRED = ("no", "screen_text", "narration", "source_ids", "visual", "type", "makes_claim")
+REQUIRED = ("no", "screen_text", "narration", "source_ids", "visual", "type", "makes_claim", "stock_query")
+STOCK_QUERY_OK = re.compile(r"^[A-Za-z][A-Za-z '\-]*$")   # 영어 단어만 (문장부호·한글 없음)
 
 PROMPT = """너는 한국어 숏폼(9:16) 영상 대본 작가다. 공개된 주제만 다룬다.
 주제: {topic}
@@ -38,15 +40,18 @@ PROMPT = """너는 한국어 숏폼(9:16) 영상 대본 작가다. 공개된 주
     "makes_claim": true 또는 false,
     "source_ids": ["r1"],
     "visual": "영어 설명",
+    "stock_query": "영어 검색 키워드 또는 빈 문자열",
     "type": "ai_image 또는 stock 또는 text_card"}} ]}}
 
 규칙:
 - makes_claim: 그 장면의 대사가 사실·수치·효과를 주장하면 true, 질문·도입·행동 권유처럼 사실 주장이 없으면 false.
 - source_ids: 사실을 주장하는 장면은 위 출처의 id를 근거로 넣는다. 사실 주장이 없는 장면은 빈 배열.
 - type과 visual:
-  · ai_image(기본): AI가 그릴 풍경·사물·분위기 장면. visual은 구체적인 영어 문장(예: "a person walking along a park path, warm afternoon light").
-  · stock: 실제 촬영 영상이 더 자연스러운 장면(사람의 움직임·도시·자연). visual은 영어 검색어 2~5단어(예: "people walking city street").
-  · text_card: 핵심 문구를 글자로만 강조하는 장면(보통 마지막). visual은 비워도 되지만 짧은 영어 문장을 적는다.
+  · ai_image(기본): AI가 사진처럼 그릴 장면. visual은 주제가 크고 가운데에 오는 구체적인 영어 문장(예: "a person walking along a park path, warm afternoon light"). stock_query는 빈 문자열.
+    visual 작성 규칙: 빛·화면·그래프·호르몬 같은 추상적인 대상을 그리지 않는다. 기기 화면이나 빛을 클로즈업하지 않는다.
+    대신 '누가, 어디서, 무엇을 하는지'가 보이는 구체적인 일상 장면을 쓴다(예: "a tired woman sitting on her bed at night looking at a phone, her face lit by the screen glow").
+  · stock: 실제 촬영 영상이 더 자연스러운 장면(사람의 움직임·도시·자연). stock_query에 영어 명사 키워드 2~3개를 쓴다(예: "sleeping bed smartphone"). 흔한 단어만, 문장 금지. visual에는 스톡을 못 찾을 때 AI가 대신 그릴 영어 설명 문장을 적는다.
+  · text_card: 핵심 문구를 글자로만 강조하는 장면(보통 마지막). stock_query는 빈 문자열, visual은 짧은 영어 문장.
   · stock은 전체의 절반 이하, ai_image는 최소 1개.
 - 첫 장면은 시청자의 호기심을 끄는 질문이나 한마디로 시작한다. 마지막 장면은 행동 권유로 끝낸다.
 - 어려운 전문용어는 쉬운 말로 풀어 쓴다."""
@@ -102,6 +107,15 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int):
         if not lo <= len(narr) <= hi:
             errs.append(f"{i}번 장면 대사 길이 {len(narr)}자 (허용 {lo}~{hi}자)")
 
+        # 스톡 장면은 Pixabay에 보낼 영어 키워드가 꼭 있어야 한다 (설명 문장을 잘라 쓰면 엉뚱한 영상이 걸린다)
+        sq = s["stock_query"].strip() if isinstance(s["stock_query"], str) else ""
+        if s["type"] == "stock":
+            n_words = len(sq.split())
+            if not (1 <= n_words <= 5 and STOCK_QUERY_OK.match(sq)):
+                errs.append(f"{i}번 장면(stock)의 stock_query는 영어 단어 1~5개여야 함: {sq!r}")
+        else:
+            sq = ""
+
         # 확인된 출처 밖의 id는 조용히 믿지 않고 제거하며 알린다
         bad = [x for x in s["source_ids"] if x not in ok_ids]
         ids = [x for x in s["source_ids"] if x in ok_ids]
@@ -115,8 +129,8 @@ def check_and_clean(data: dict, n: int, ok_ids: set, target: int):
         if len(s["screen_text"]) > 24:
             warns.append(f"{i}번 장면 screen_text가 {len(s['screen_text'])}자로 김")
         clean.append({"no": i, "screen_text": s["screen_text"].strip(), "narration": narr,
-                      "source_ids": ids, "visual": s["visual"].strip(), "type": s["type"],
-                      "unverified": unverified})
+                      "source_ids": ids, "visual": s["visual"].strip(), "stock_query": sq,
+                      "type": s["type"], "unverified": unverified})
     if errs:
         return None, errs, warns
     return clean, errs, warns
