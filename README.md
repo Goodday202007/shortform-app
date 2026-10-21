@@ -17,7 +17,8 @@
 | **구현 완료** | ①~⑦ 모든 단계, 승인 3개(승인 ①, 이미지 확인, 승인 ②)와 반려 시 되돌아가기, 장면 단위 다시 만들기(그림·스톡·대본), 이어서 실행, Streamlit 화면, 무료 한도 사용량 표시, 대체 수단(스톡→AI 그림→글자 카드) |
 | **확인한 것** | 모든 단계를 실제 무료 서비스로 호출해 확인, **60초 9장면 영상 1편 완주**, 화면 헤드리스 시험 81항목 등 시험 묶음 14개 259항목(개발 중 임시 스크립트), 새로 복제해 설치·실행해 본 검증 |
 | **아직 못 한 것** | 음성·움직임·합성의 장면 단위 다시 만들기, YouTube 인기 영상 참고(선택), 저장소에 올라간 자동 시험 파일, 분야가 다른 시험 주제 3개로 만든 시연용 영상과 팀원 교차 점검표 |
-| **팀 결정이 필요한 것** | GitHub Private 저장소 생성(아직 로컬에만 있음), Pretendard 글꼴 라이선스 확인 후 저장소에 올릴지, 쓰이지 않는 `moviepy` 제거 여부, 공용 파일 형식 확정([변경 목록](docs/공용파일_형식_변경.md)) |
+| **저장소** | GitHub **Private** 저장소 `Goodday202007/shortform-app`에 올라가 있다(2026-10-21). 팀원은 저장소 주인이 **Settings → Collaborators**에서 초대해야 읽을 수 있다 |
+| **팀 결정이 필요한 것** | Pretendard 글꼴 라이선스 확인 후 저장소에 올릴지, 쓰이지 않는 `moviepy` 제거 여부, 공용 파일 형식 확정([변경 목록](docs/공용파일_형식_변경.md)) |
 
 > 이 문서는 **사용법과 현재 상태**를 다룬다. 만든 과정과 막힌 곳(시간순)은 [`docs/notes.md`](docs/notes.md), 파일 형식은 [`docs/공용파일_형식_변경.md`](docs/공용파일_형식_변경.md)에 있다.
 
@@ -53,8 +54,8 @@
 
 ### 순서
 ```bash
-git clone <저장소 주소>
-cd app
+git clone https://github.com/Goodday202007/shortform-app.git
+cd shortform-app
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 copy .env.example .env
